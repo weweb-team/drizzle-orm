@@ -134,9 +134,9 @@ export function normalizeRoutineSnapshots(
 			return { ...enumType, name: relationRename.to.name, schema: relationRename.to.schema || 'public' };
 		}
 		const relationMove = movedRelations.find((item) =>
-			item.schemaFrom === enumType.schema && item.name === enumType.name
+			(item.schemaFrom || 'public') === enumType.schema && item.name === enumType.name
 		);
-		return { ...enumType, schema: relationMove?.schemaTo ?? enumType.schema };
+		return { ...enumType, schema: relationMove ? relationMove.schemaTo || 'public' : enumType.schema };
 	};
 	const remapped: Record<string, PgFunction> = {};
 	const drops: Record<string, PgFunction> = {};

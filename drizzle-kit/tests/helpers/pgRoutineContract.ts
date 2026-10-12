@@ -793,6 +793,47 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 			expect(await generate()).toEqual([]);
 		});
 
+		it.each(['out', 'into'])(
+			'preserves row-type routines when moving %s of public with empty decision schemas',
+			async (direction) => {
+				const oldSchema = direction === 'out' ? 'public' : 'auth';
+				const newSchema = direction === 'out' ? 'auth' : 'public';
+				for (const client of [source, target]) {
+					await client.query(`CREATE SCHEMA auth; CREATE TABLE ${oldSchema}.items(id integer);
+				CREATE FUNCTION public.watch(${oldSchema}.items) RETURNS integer LANGUAGE sql AS 'SELECT $1.id';
+				CREATE VIEW public.watched AS SELECT public.watch(ROW(2)::${oldSchema}.items) AS result`);
+				}
+				await target.query(`REVOKE EXECUTE ON FUNCTION public.watch(${oldSchema}.items) FROM PUBLIC;
+				GRANT EXECUTE ON FUNCTION public.watch(${oldSchema}.items) TO pg_read_all_data`);
+				const before = (await target.query(
+					`SELECT oid, proacl FROM pg_proc WHERE oid = 'public.watch(${oldSchema}.items)'::regprocedure`,
+				)).rows;
+				await source.query(`ALTER TABLE ${oldSchema}.items SET SCHEMA ${newSchema}`);
+				await conflictFor('tables');
+				const statements = await generate({
+					tables: {
+						created: [],
+						deleted: [],
+						renamed: [],
+						moved: [{
+							name: 'items',
+							schemaFrom: oldSchema === 'public' ? '' : oldSchema,
+							schemaTo: newSchema === 'public' ? '' : newSchema,
+						}],
+					},
+				});
+				expect(statements.some((statement) => statement.startsWith('DROP FUNCTION'))).toBe(false);
+				await apply(statements);
+				expect(
+					(await target.query(
+						`SELECT oid, proacl FROM pg_proc WHERE oid = 'public.watch(${newSchema}.items)'::regprocedure`,
+					)).rows,
+				).toEqual(before);
+				expect((await target.query('SELECT * FROM public.watched')).rows).toEqual([{ result: 2 }]);
+				expect(await generate()).toEqual([]);
+			},
+		);
+
 		it('accepts unchanged legacy snapshots and requests re-introspection before destructive legacy diffs', async () => {
 			for (const client of [source, target]) {
 				await client.query(`CREATE FUNCTION public.watch(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1'`);
