@@ -695,6 +695,104 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 			expect(await generate()).toEqual([]);
 		});
 
+		it.each([
+			['rename', false],
+			['rename', true],
+			['move', false],
+			['move', true],
+		])('preserves row-type routine grants and dependents during a table %s (array: %s)', async (operation, array) => {
+			const suffix = array ? '[]' : '';
+			const body = array ? 'SELECT ($1[1]).id' : 'SELECT $1.id';
+			const argument = array ? 'ARRAY[ROW(2)::public.items]' : 'ROW(2)::public.items';
+			for (const client of [source, target]) {
+				await client.query(`CREATE SCHEMA auth; CREATE TABLE public.items(id integer);
+				CREATE FUNCTION public.watch(public.items${suffix}) RETURNS integer LANGUAGE sql AS '${body}';
+				CREATE VIEW public.watched AS SELECT public.watch(${argument}) AS result`);
+			}
+			await target.query(`REVOKE EXECUTE ON FUNCTION public.watch(public.items${suffix}) FROM PUBLIC;
+				GRANT EXECUTE ON FUNCTION public.watch(public.items${suffix}) TO pg_read_all_data`);
+			const before = (await target.query(
+				`SELECT oid, proacl FROM pg_proc WHERE oid = 'public.watch(public.items${suffix})'::regprocedure`,
+			)).rows;
+			await source.query(
+				operation === 'rename'
+					? 'ALTER TABLE public.items RENAME TO entries'
+					: 'ALTER TABLE public.items SET SCHEMA auth',
+			);
+			const conflict = await conflictFor('tables');
+			const statements = await generate({
+				tables: {
+					created: [],
+					deleted: [],
+					renamed: operation === 'rename' ? [{ from: conflict.deleted[0], to: conflict.created[0] }] : [],
+					moved: operation === 'move' ? [{ name: 'items', schemaFrom: 'public', schemaTo: 'auth' }] : [],
+				},
+			});
+			expect(statements.some((statement) => statement.startsWith('DROP FUNCTION'))).toBe(false);
+			await apply(statements);
+			const type = operation === 'rename' ? 'public.entries' : 'auth.items';
+			expect(
+				(await target.query(
+					`SELECT oid, proacl FROM pg_proc WHERE oid = 'public.watch(${type}${suffix})'::regprocedure`,
+				)).rows,
+			).toEqual(before);
+			expect((await target.query('SELECT * FROM public.watched')).rows).toEqual([{ result: 2 }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it.each(['rename', 'move'])('preserves routine identity during a view %s', async (operation) => {
+			for (const client of [source, target]) {
+				await client.query(`CREATE SCHEMA auth; CREATE VIEW public.items AS SELECT 2 AS id;
+				CREATE FUNCTION public.watch(public.items) RETURNS integer LANGUAGE sql AS 'SELECT $1.id';
+				CREATE VIEW public.watched AS SELECT public.watch(ROW(2)::public.items) AS result`);
+			}
+			const before =
+				(await target.query("SELECT oid FROM pg_proc WHERE oid = 'public.watch(public.items)'::regprocedure")).rows;
+			await source.query(
+				operation === 'rename'
+					? 'ALTER VIEW public.items RENAME TO entries'
+					: 'ALTER VIEW public.items SET SCHEMA auth',
+			);
+			const conflict = await conflictFor('views');
+			const statements = await generate({
+				views: {
+					created: [],
+					deleted: [],
+					renamed: operation === 'rename' ? [{ from: conflict.deleted[0], to: conflict.created[0] }] : [],
+					moved: operation === 'move' ? [{ name: 'items', schemaFrom: 'public', schemaTo: 'auth' }] : [],
+				},
+			});
+			expect(statements.some((statement) => statement.startsWith('DROP FUNCTION'))).toBe(false);
+			await apply(statements);
+			const type = operation === 'rename' ? 'public.entries' : 'auth.items';
+			expect((await target.query(`SELECT oid FROM pg_proc WHERE oid = 'public.watch(${type})'::regprocedure`)).rows)
+				.toEqual(before);
+			expect((await target.query('SELECT * FROM public.watched')).rows).toEqual([{ result: 2 }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it('uses the original table type name when removing a routine during a rename', async () => {
+			for (const client of [source, target]) {
+				await client.query(`CREATE TABLE public.items(id integer);
+				CREATE FUNCTION public.watch(public.items) RETURNS integer LANGUAGE sql AS 'SELECT $1.id'`);
+			}
+			await source.query('DROP FUNCTION public.watch(public.items); ALTER TABLE public.items RENAME TO entries');
+			const conflict = await conflictFor('tables');
+			await apply(
+				await generate({
+					tables: {
+						created: [],
+						deleted: [],
+						renamed: [{ from: conflict.deleted[0], to: conflict.created[0] }],
+						moved: [],
+					},
+				}),
+			);
+			expect((await target.query("SELECT count(*)::integer AS remaining FROM pg_proc WHERE proname = 'watch'")).rows)
+				.toEqual([{ remaining: 0 }]);
+			expect(await generate()).toEqual([]);
+		});
+
 		it('accepts unchanged legacy snapshots and requests re-introspection before destructive legacy diffs', async () => {
 			for (const client of [source, target]) {
 				await client.query(`CREATE FUNCTION public.watch(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1'`);

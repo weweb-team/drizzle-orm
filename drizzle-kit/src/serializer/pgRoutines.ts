@@ -115,23 +115,45 @@ export function normalizeRoutineSnapshots(
 	renamedSchemas: Rename[],
 	renamedEnums: Rename[],
 	movedEnums: Move[],
+	renamedRelations: Rename[] = [],
+	movedRelations: Move[] = [],
 ) {
 	const schemaAfterRename = (schema: string) =>
 		renamedSchemas.find((rename) => rename.from.name === schema)?.to.name ?? schema;
-	const typeAfterRename = (type: RoutineType): RoutineType => {
+	const typeAfterRename = (type: RoutineType, includeRelations = true): RoutineType => {
 		const schema = schemaAfterRename(type.schema);
 		const rename = renamedEnums.find((item) => item.from.schema === schema && item.from.name === type.name);
 		if (rename) return { ...type, name: rename.to.name, schema: rename.to.schema ?? 'public' };
 		const move = movedEnums.find((item) => item.schemaFrom === schema && item.name === type.name);
-		return { ...type, schema: move?.schemaTo ?? schema };
+		const enumType = { ...type, schema: move?.schemaTo ?? schema };
+		if (!includeRelations) return enumType;
+		const relationRename = renamedRelations.find((item) =>
+			(item.from.schema || 'public') === enumType.schema && item.from.name === enumType.name
+		);
+		if (relationRename) {
+			return { ...enumType, name: relationRename.to.name, schema: relationRename.to.schema || 'public' };
+		}
+		const relationMove = movedRelations.find((item) =>
+			item.schemaFrom === enumType.schema && item.name === enumType.name
+		);
+		return { ...enumType, schema: relationMove?.schemaTo ?? enumType.schema };
 	};
 	const remapped: Record<string, PgFunction> = {};
+	const drops: Record<string, PgFunction> = {};
 	for (const [key, fn] of Object.entries(previous)) {
 		remapped[key] = {
 			...fn,
 			schema: schemaAfterRename(fn.schema),
 			parameters: fn.parameters?.map((parameter) => ({ ...parameter, type: typeAfterRename(parameter.type) })),
 			returnType: fn.returnType ? typeAfterRename(fn.returnType) : undefined,
+		};
+		// Relation renames run after drops. Compare their final identities, but use
+		// their current names if this routine really must be removed/recreated.
+		drops[routineKey(remapped[key])] = {
+			...fn,
+			schema: schemaAfterRename(fn.schema),
+			parameters: fn.parameters?.map((parameter) => ({ ...parameter, type: typeAfterRename(parameter.type, false) })),
+			returnType: fn.returnType ? typeAfterRename(fn.returnType, false) : undefined,
 		};
 	}
 	// Upgrade unchanged legacy entries using an exact definition match. Never guess
@@ -163,7 +185,7 @@ export function normalizeRoutineSnapshots(
 		}
 		return result;
 	};
-	return { previous: normalize(remapped, current), current: normalize(current, remapped) };
+	return { previous: normalize(remapped, current), current: normalize(current, remapped), drops };
 }
 
 export function deferRoutineBodyValidation(definition: string): string {

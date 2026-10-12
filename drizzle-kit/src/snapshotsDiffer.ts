@@ -1959,26 +1959,28 @@ export const applyPgSnapshotsDiff = async (
 	const jsonCreateProcedures: JsonStatement[] = [];
 	const jsonDropProcedures: JsonStatement[] = [];
 
-	const { previous: previousFunctions, current: currentFunctions } = normalizeRoutineSnapshots(
+	const { previous: previousFunctions, current: currentFunctions, drops: functionDrops } = normalizeRoutineSnapshots(
 		json1.functions ?? {},
 		json2.functions ?? {},
 		renamedSchemas,
 		renamedEnums,
 		movedEnums,
+		[...renamedTables, ...renamedViews],
+		[...movedTables, ...movedViews],
 	);
 	const functionsDiff = diffSchemasOrTables(previousFunctions, currentFunctions);
 	for (const func of functionsDiff.added) {
 		jsonCreateFunctions.push(prepareCreateFunctionJson(func));
 	}
 	for (const func of functionsDiff.deleted) {
-		jsonDropFunctions.push(prepareDropFunctionJson(func));
+		jsonDropFunctions.push(prepareDropFunctionJson(functionDrops[routineKey(func)] ?? func));
 	}
 	for (const key of Object.keys(previousFunctions)) {
 		if (currentFunctions[key]) {
 			const prev = previousFunctions[key];
 			const cur = currentFunctions[key];
 			if (prev.definition !== cur.definition) {
-				if (routineRequiresDrop(prev, cur)) jsonDropFunctions.push(prepareDropFunctionJson(prev));
+				if (routineRequiresDrop(prev, cur)) jsonDropFunctions.push(prepareDropFunctionJson(functionDrops[key] ?? prev));
 				jsonCreateFunctions.push(prepareCreateFunctionJson(cur));
 			}
 		}
@@ -2002,26 +2004,30 @@ export const applyPgSnapshotsDiff = async (
 		}
 	}
 
-	const { previous: previousProcedures, current: currentProcedures } = normalizeRoutineSnapshots(
+	const { previous: previousProcedures, current: currentProcedures, drops: procedureDrops } = normalizeRoutineSnapshots(
 		json1.procedures ?? {},
 		json2.procedures ?? {},
 		renamedSchemas,
 		renamedEnums,
 		movedEnums,
+		[...renamedTables, ...renamedViews],
+		[...movedTables, ...movedViews],
 	);
 	const proceduresDiff = diffSchemasOrTables(previousProcedures, currentProcedures);
 	for (const proc of proceduresDiff.added) {
 		jsonCreateProcedures.push(prepareCreateProcedureJson(proc));
 	}
 	for (const proc of proceduresDiff.deleted) {
-		jsonDropProcedures.push(prepareDropProcedureJson(proc));
+		jsonDropProcedures.push(prepareDropProcedureJson(procedureDrops[routineKey(proc)] ?? proc));
 	}
 	for (const key of Object.keys(previousProcedures)) {
 		if (currentProcedures[key]) {
 			const prev = previousProcedures[key];
 			const cur = currentProcedures[key];
 			if (prev.definition !== cur.definition) {
-				if (routineRequiresDrop(prev, cur)) jsonDropProcedures.push(prepareDropProcedureJson(prev));
+				if (routineRequiresDrop(prev, cur)) {
+					jsonDropProcedures.push(prepareDropProcedureJson(procedureDrops[key] ?? prev));
+				}
 				jsonCreateProcedures.push(prepareCreateProcedureJson(cur));
 			}
 		}
@@ -2087,7 +2093,9 @@ export const applyPgSnapshotsDiff = async (
 			).sort(),
 		});
 	}
-	const availableRoutines = new Set([...Object.keys(previousFunctions), ...Object.keys(previousProcedures)]);
+	const availableRoutines = new Set(
+		[...Object.values(functionDrops), ...Object.values(procedureDrops)].map(routineKey),
+	);
 	for (const statement of [...jsonDropFunctions, ...jsonDropProcedures]) {
 		if (statement.type !== 'drop_function' && statement.type !== 'drop_procedure') continue;
 		availableRoutines.delete(JSON.stringify([statement.schema, statement.name, statement.argumentTypes]));
