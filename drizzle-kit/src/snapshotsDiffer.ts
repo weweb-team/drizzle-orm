@@ -13,7 +13,7 @@ import {
 	ZodTypeAny,
 } from 'zod';
 import { applyJsonDiff, diffColumns, diffIndPolicies, diffPolicies, diffSchemasOrTables } from './jsonDiffer';
-import { normalizeRoutineSnapshots, routineRequiresDrop } from './serializer/pgRoutines';
+import { normalizeRoutineSnapshots, routineKey, routineRequiresDrop } from './serializer/pgRoutines';
 import { fromJson } from './sqlgenerator';
 
 import {
@@ -2042,8 +2042,11 @@ export const applyPgSnapshotsDiff = async (
 	const lateRoutineCreates: JsonStatement[] = [];
 	const afterViewRoutineCreates: JsonStatement[] = [];
 	const tablesChange = createTables.length > 0 || jsonRenameTables.length > 0 || jsonTableAlternations.length > 0
-		|| jsonAddColumnsStatemets.length > 0 || jsonRenameColumnsStatements.length > 0;
-	const relationsChange = tablesChange || createViews.length > 0 || renameViews.length > 0 || alterViews.length > 0;
+		|| jsonAddColumnsStatemets.length > 0 || jsonRenameColumnsStatements.length > 0
+		|| jsonSetTableSchemas.length > 0 || jsonDropTables.length > 0 || jsonDropColumnsStatemets.length > 0;
+	const relationsChange = tablesChange || createViews.length > 0 || renameViews.length > 0 || alterViews.length > 0
+		|| dropViews.length > 0;
+	const creationNodes = new Map<string, { statement: JsonStatement; phase: number; dependencies: string[] }>();
 	for (const statement of [...jsonCreateFunctions, ...jsonCreateProcedures]) {
 		if (statement.type !== 'create_function' && statement.type !== 'create_procedure') continue;
 		const fn = routinesByDefinition.get(statement.definition)!;
@@ -2059,17 +2062,60 @@ export const applyPgSnapshotsDiff = async (
 			const previous = previousRelations[`${relation.schema}.${relation.name}`];
 			return !previous || relation.columns.some((column) => !Object.keys(previous.columns).includes(column));
 		});
-		if (missingRelations.some((relation) => curFull.views[`${relation.schema}.${relation.name}`])) {
-			afterViewRoutineCreates.push(statement);
-			continue;
+		const phase = missingRelations.some((relation) => curFull.views[`${relation.schema}.${relation.name}`])
+			? 2
+			: missingRelations.length > 0
+			? 1
+			: 0;
+		creationNodes.set(routineKey(fn), {
+			statement: relationsChange ? { ...statement, deferBodyValidation: true } : statement,
+			phase,
+			dependencies: (fn.routineDependencies ?? []).map((dependency) =>
+				JSON.stringify([dependency.schema, dependency.name, dependency.argumentTypes])
+			).sort(),
+		});
+	}
+	const availableRoutines = new Set([...Object.keys(previousFunctions), ...Object.keys(previousProcedures)]);
+	for (const statement of [...jsonDropFunctions, ...jsonDropProcedures]) {
+		if (statement.type !== 'drop_function' && statement.type !== 'drop_procedure') continue;
+		availableRoutines.delete(JSON.stringify([statement.schema, statement.name, statement.argumentTypes]));
+	}
+	const remainingDependencies = new Map<string, number>();
+	const callersByDependency = new Map<string, string[]>();
+	const readyRoutines: string[] = [];
+	for (const [key, node] of creationNodes) {
+		const dependencies = new Set(
+			node.dependencies.filter((dependency) => !availableRoutines.has(dependency) && creationNodes.has(dependency)),
+		);
+		remainingDependencies.set(key, dependencies.size);
+		if (dependencies.size === 0) readyRoutines.push(key);
+		for (const dependency of dependencies) {
+			if (!callersByDependency.has(dependency)) callersByDependency.set(dependency, []);
+			callersByDependency.get(dependency)!.push(key);
 		}
-		if (missingRelations.length > 0) {
-			lateRoutineCreates.push(statement);
-			continue;
+	}
+	const orderedRoutines: { statement: JsonStatement; phase: number }[] = [];
+	for (const key of readyRoutines) {
+		const node = creationNodes.get(key)!;
+		orderedRoutines.push(node);
+		for (const caller of callersByDependency.get(key) ?? []) {
+			const callerNode = creationNodes.get(caller)!;
+			callerNode.phase = Math.max(callerNode.phase, node.phase);
+			const remaining = remainingDependencies.get(caller)! - 1;
+			remainingDependencies.set(caller, remaining);
+			if (remaining === 0) readyRoutines.push(caller);
 		}
-		// Keep routines available to table defaults/checks. String SQL bodies can
-		// mention future relations; defer validation only while creating the routine.
-		earlyRoutineCreates.push(relationsChange ? { ...statement, deferBodyValidation: true } : statement);
+	}
+	if (orderedRoutines.length !== creationNodes.size) {
+		throw new Error('Cyclic routine creation dependencies require an explicit migration.');
+	}
+	for (const node of orderedRoutines) {
+		const destination = node.phase === 2
+			? afterViewRoutineCreates
+			: node.phase === 1
+			? lateRoutineCreates
+			: earlyRoutineCreates;
+		destination.push(node.statement);
 	}
 
 	jsonStatements.push(...createSchemas);

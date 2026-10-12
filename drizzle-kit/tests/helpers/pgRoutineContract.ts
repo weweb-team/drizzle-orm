@@ -591,6 +591,68 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 				.toEqual([{ remaining: 2 }]);
 		});
 
+		it('updates a string SQL body after moving its table to another schema', async () => {
+			for (const client of [source, target]) {
+				await client.query(`CREATE SCHEMA auth; CREATE TABLE public.items(id integer);
+				CREATE FUNCTION public.item_count() RETURNS bigint LANGUAGE sql AS 'SELECT count(*) FROM public.items'`);
+			}
+			await source.query(`ALTER TABLE public.items SET SCHEMA auth;
+				CREATE OR REPLACE FUNCTION public.item_count() RETURNS bigint LANGUAGE sql AS 'SELECT count(*) FROM auth.items'`);
+			await conflictFor('tables');
+			await apply(
+				await generate({
+					tables: {
+						created: [],
+						deleted: [],
+						renamed: [],
+						moved: [{ name: 'items', schemaFrom: 'public', schemaTo: 'auth' }],
+					},
+				}),
+			);
+			expect((await target.query('SELECT public.item_count() AS result')).rows).toEqual([{ result: '0' }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it.each(['table', 'view'])('orders standard SQL callers after callees requiring a new %s', async (kind) => {
+			await source.query(
+				kind === 'table' ? 'CREATE TABLE public.items(id integer)' : 'CREATE VIEW public.items AS SELECT 1 AS id',
+			);
+			await source.query(
+				`CREATE FUNCTION public.z_count() RETURNS bigint LANGUAGE sql RETURN (SELECT count(*) FROM public.items);
+				CREATE FUNCTION public.a_caller() RETURNS bigint LANGUAGE sql RETURN public.z_count()`,
+			);
+			await apply(await generate());
+			expect((await target.query('SELECT public.a_caller() AS result')).rows).toEqual([{
+				result: kind === 'table' ? '0' : '1',
+			}]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it('defers string-body checks for a table-typed routine that reads a new view', async () => {
+			await source.query(`CREATE TABLE public.items(id integer);
+				CREATE VIEW public.items_view AS SELECT * FROM public.items;
+				CREATE FUNCTION public.list_items() RETURNS SETOF public.items LANGUAGE sql AS 'SELECT id FROM public.items_view'`);
+			await apply(await generate());
+			await target.query('INSERT INTO public.items VALUES (1)');
+			expect((await target.query('SELECT * FROM public.list_items()')).rows).toEqual([{ id: 1 }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it('replaces compatible mutually dependent routines already present in the target', async () => {
+			for (const client of [source, target]) {
+				await client.query(`CREATE FUNCTION public.a_caller(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1';
+				CREATE FUNCTION public.z_callee(integer) RETURNS integer LANGUAGE sql RETURN public.a_caller($1);
+				CREATE OR REPLACE FUNCTION public.a_caller(integer) RETURNS integer LANGUAGE sql RETURN public.z_callee($1)`);
+			}
+			await source.query(
+				`CREATE OR REPLACE FUNCTION public.a_caller(integer) RETURNS integer LANGUAGE sql RETURN CASE WHEN $1 = 0 THEN 0 ELSE public.z_callee($1 - 1) END;
+				CREATE OR REPLACE FUNCTION public.z_callee(integer) RETURNS integer LANGUAGE sql RETURN CASE WHEN $1 = 0 THEN 0 ELSE public.a_caller($1 - 1) END`,
+			);
+			await apply(await generate());
+			expect((await target.query('SELECT public.a_caller(2) AS result')).rows).toEqual([{ result: 0 }]);
+			expect(await generate()).toEqual([]);
+		});
+
 		it('accepts unchanged legacy snapshots and requests re-introspection before destructive legacy diffs', async () => {
 			for (const client of [source, target]) {
 				await client.query(`CREATE FUNCTION public.watch(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1'`);

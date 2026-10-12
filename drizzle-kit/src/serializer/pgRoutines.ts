@@ -47,6 +47,24 @@ export async function introspectPgRoutines(db: DB, schemaFilters: string[]) {
 		p.proretset AS "returnsSet",
 		p.pronargdefaults AS "defaultCount",
 		COALESCE((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+			'schema', referenced_namespace.nspname, 'name', referenced.proname,
+			'argumentTypes', COALESCE((SELECT pg_catalog.jsonb_agg(
+				${
+		typeExpression('referenced_type', 'referenced_type_namespace', 'referenced_element', 'referenced_element_namespace')
+	}
+				ORDER BY argument.position)
+				FROM pg_catalog.unnest(referenced.proargtypes::oid[]) WITH ORDINALITY argument(type_oid, position)
+				JOIN pg_catalog.pg_type referenced_type ON referenced_type.oid = argument.type_oid
+				JOIN pg_catalog.pg_namespace referenced_type_namespace ON referenced_type_namespace.oid = referenced_type.typnamespace
+				LEFT JOIN pg_catalog.pg_type referenced_element ON referenced_element.oid = referenced_type.typelem
+				LEFT JOIN pg_catalog.pg_namespace referenced_element_namespace ON referenced_element_namespace.oid = referenced_element.typnamespace
+			), '[]'::jsonb)))
+			FROM pg_catalog.pg_depend dependency
+			JOIN pg_catalog.pg_proc referenced ON referenced.oid = dependency.refobjid
+			JOIN pg_catalog.pg_namespace referenced_namespace ON referenced_namespace.oid = referenced.pronamespace
+			WHERE dependency.classid = 'pg_catalog.pg_proc'::regclass AND dependency.objid = p.oid
+				AND dependency.refclassid = 'pg_catalog.pg_proc'::regclass), '[]'::jsonb) AS "routineDependencies",
+		COALESCE((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
 			'schema', relation_namespace.nspname, 'name', relation.relname,
 			'columns', CASE WHEN dependency.refobjsubid = 0 THEN '[]'::jsonb ELSE pg_catalog.jsonb_build_array(attribute.attname) END))
 			FROM pg_catalog.pg_depend dependency
@@ -138,6 +156,7 @@ export function normalizeRoutineSnapshots(
 					returnsSet: match.returnsSet,
 					defaultCount: match.defaultCount,
 					relationDependencies: match.relationDependencies,
+					routineDependencies: match.routineDependencies,
 				}
 				: fn;
 			result[routineKey(normalized)] = normalized;

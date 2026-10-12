@@ -172,6 +172,9 @@ export const functionSchema = object({
 	defaultCount: number().optional(),
 	relationDependencies: array(object({ schema: string(), name: string(), columns: array(string()) }).strict())
 		.optional(),
+	routineDependencies: array(
+		object({ schema: string(), name: string(), argumentTypes: array(routineTypeSchema) }).strict(),
+	).optional(),
 }).strict();
 
 export const triggerSchema = object({
