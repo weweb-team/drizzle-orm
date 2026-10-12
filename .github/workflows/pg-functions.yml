@@ -14,6 +14,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  checks:
+    name: Kit checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check formatting
+        run: pnpm lint
+      - name: Build ORM runtime
+        run: pnpm --filter drizzle-orm build
+      - name: Run PostgreSQL schema diff unit tests
+        run: >-
+          pnpm --filter @weweb/drizzle-kit exec vitest run
+          tests/pg-enums.test.ts tests/pg-schemas.test.ts tests/pg-tables.test.ts
+          tests/pg-columns.test.ts tests/pg-views.test.ts tests/pg-sequences.test.ts
+
   migrations:
     runs-on: ubuntu-latest
     strategy:

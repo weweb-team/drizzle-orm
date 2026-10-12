@@ -5,6 +5,16 @@ This is a WeWeb fork of Drizzle Kit that exposes PostgreSQL-specific programmati
 **Original Repository**: [drizzle-team/drizzle-orm](https://github.com/drizzle-team/drizzle-orm)
 **Fork Repository**: [weweb-team/drizzle-orm](https://github.com/weweb-team/drizzle-orm)
 
+### Fork CI
+
+Pull requests and pushes to `main` check formatting, PostgreSQL schema diffs, Kit types,
+and package exports. Routine migration contracts run on PostgreSQL 16 and 18 with pgvector,
+against both the source API and the built CommonJS package. GitHub's repository-managed
+default CodeQL setup provides security scanning.
+
+The upstream multi-package publish and unpublish workflows are removed. Package releases
+are manual; this CI does not publish packages or modify npm tags.
+
 ### What's Different?
 
 This fork provides:
