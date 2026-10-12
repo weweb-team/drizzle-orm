@@ -653,6 +653,48 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 			expect(await generate()).toEqual([]);
 		});
 
+		it.each(['atomic', 'rowtype'])('creates a %s routine after recreating a changed view', async (kind) => {
+			for (const client of [source, target]) {
+				await client.query(`CREATE TABLE public.items(id integer); INSERT INTO public.items VALUES(1);
+				CREATE VIEW public.item_view AS SELECT id FROM public.items WHERE id >= 0`);
+			}
+			await source.query('CREATE OR REPLACE VIEW public.item_view AS SELECT id FROM public.items WHERE id > 0');
+			await source.query(
+				kind === 'atomic'
+					? 'CREATE FUNCTION public.watch() RETURNS bigint LANGUAGE sql RETURN (SELECT count(*) FROM public.item_view)'
+					: "CREATE FUNCTION public.watch() RETURNS SETOF public.item_view LANGUAGE sql AS 'SELECT * FROM public.item_view'",
+			);
+			await apply(await generate());
+			expect((await target.query('SELECT * FROM public.watch()')).rows).toEqual(
+				kind === 'atomic' ? [{ watch: '1' }] : [{ id: 1 }],
+			);
+			expect(await generate()).toEqual([]);
+		});
+
+		it('creates standard SQL routines after changing a referenced column type', async () => {
+			for (const client of [source, target]) {
+				await client.query('CREATE TABLE public.items(id integer); INSERT INTO public.items VALUES (1)');
+			}
+			await source.query(`ALTER TABLE public.items ALTER COLUMN id TYPE bigint;
+				CREATE FUNCTION public.watch() RETURNS bigint LANGUAGE sql RETURN (SELECT max(id) FROM public.items)`);
+			await apply(await generate());
+			expect((await target.query('SELECT public.watch() AS result')).rows).toEqual([{ result: '1' }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it('waits for both added columns and recreated views required by standard SQL bodies', async () => {
+			for (const client of [source, target]) {
+				await client.query(`CREATE TABLE public.items(id integer); INSERT INTO public.items VALUES (1);
+				CREATE VIEW public.item_view AS SELECT id FROM public.items`);
+			}
+			await source.query(`ALTER TABLE public.items ADD COLUMN extra integer DEFAULT 5;
+				CREATE OR REPLACE VIEW public.item_view AS SELECT id, extra FROM public.items;
+				CREATE FUNCTION public.watch() RETURNS integer LANGUAGE sql RETURN (SELECT max(items.extra) FROM public.items JOIN public.item_view USING(id))`);
+			await apply(await generate());
+			expect((await target.query('SELECT public.watch() AS result')).rows).toEqual([{ result: 5 }]);
+			expect(await generate()).toEqual([]);
+		});
+
 		it('accepts unchanged legacy snapshots and requests re-introspection before destructive legacy diffs', async () => {
 			for (const client of [source, target]) {
 				await client.query(`CREATE FUNCTION public.watch(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1'`);

@@ -2035,6 +2035,14 @@ export const applyPgSnapshotsDiff = async (
 		}),
 	);
 	const currentRelations = { ...curFull.tables, ...curFull.views };
+	const recreatedViews = new Set(dropViews.map((view) => JSON.stringify([view.schema || 'public', view.name])));
+	const retypedColumns = new Set(jsonTableAlternations.flatMap((statement) => {
+		if (
+			statement.type !== 'alter_table_alter_column_set_type'
+			&& statement.type !== 'pg_alter_table_alter_column_set_type'
+		) return [];
+		return [JSON.stringify([statement.schema || 'public', statement.tableName, statement.columnName])];
+	}));
 	const routinesByDefinition = new Map(
 		[...Object.values(currentFunctions), ...Object.values(currentProcedures)].map((fn) => [fn.definition, fn]),
 	);
@@ -2059,8 +2067,12 @@ export const applyPgSnapshotsDiff = async (
 		).map((type) => ({ ...type, columns: [] }));
 		requiredRelations.push(...(fn.relationDependencies ?? []));
 		const missingRelations = requiredRelations.filter((relation) => {
+			if (recreatedViews.has(JSON.stringify([relation.schema, relation.name]))) return true;
 			const previous = previousRelations[`${relation.schema}.${relation.name}`];
-			return !previous || relation.columns.some((column) => !Object.keys(previous.columns).includes(column));
+			return !previous || relation.columns.some((column) =>
+				!Object.keys(previous.columns).includes(column)
+				|| retypedColumns.has(JSON.stringify([relation.schema, relation.name, column]))
+			);
 		});
 		const phase = missingRelations.some((relation) => curFull.views[`${relation.schema}.${relation.name}`])
 			? 2
