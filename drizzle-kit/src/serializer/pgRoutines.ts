@@ -46,6 +46,15 @@ export async function introspectPgRoutines(db: DB, schemaFilters: string[]) {
 		pg_catalog.pg_get_functiondef(p.oid) AS definition,
 		p.proretset AS "returnsSet",
 		p.pronargdefaults AS "defaultCount",
+		COALESCE((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+			'schema', relation_namespace.nspname, 'name', relation.relname,
+			'columns', CASE WHEN dependency.refobjsubid = 0 THEN '[]'::jsonb ELSE pg_catalog.jsonb_build_array(attribute.attname) END))
+			FROM pg_catalog.pg_depend dependency
+			JOIN pg_catalog.pg_class relation ON relation.oid = dependency.refobjid
+			JOIN pg_catalog.pg_namespace relation_namespace ON relation_namespace.oid = relation.relnamespace
+			LEFT JOIN pg_catalog.pg_attribute attribute ON attribute.attrelid = relation.oid AND attribute.attnum = dependency.refobjsubid
+			WHERE dependency.classid = 'pg_catalog.pg_proc'::regclass AND dependency.objid = p.oid
+				AND dependency.refclassid = 'pg_catalog.pg_class'::regclass), '[]'::jsonb) AS "relationDependencies",
 		${typeExpression('return_type', 'return_namespace', 'return_element', 'return_element_namespace')} AS "returnType",
 		COALESCE((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
 			'name', COALESCE(p.proargnames[argument.position], ''),
@@ -112,11 +121,15 @@ export function normalizeRoutineSnapshots(
 	const normalize = (records: Record<string, PgFunction>, reference: Record<string, PgFunction>) => {
 		const result: Record<string, PgFunction> = {};
 		for (const fn of Object.values(records)) {
-			const match = fn.parameters
-				? undefined
-				: Object.values(reference).find((other) =>
-					other.parameters && other.schema === fn.schema && other.name === fn.name && other.definition === fn.definition
-				);
+			if (fn.parameters) {
+				result[routineKey(fn)] = fn;
+				continue;
+			}
+			const candidates = Object.values(reference).filter((other) =>
+				other.schema === fn.schema && other.name === fn.name
+			);
+			const match = candidates.find((other) => other.definition === fn.definition);
+			if (!match || candidates.length > 1) requireRoutineParameters(fn);
 			const normalized = match
 				? {
 					...fn,
@@ -124,6 +137,7 @@ export function normalizeRoutineSnapshots(
 					returnType: match.returnType,
 					returnsSet: match.returnsSet,
 					defaultCount: match.defaultCount,
+					relationDependencies: match.relationDependencies,
 				}
 				: fn;
 			result[routineKey(normalized)] = normalized;
@@ -131,6 +145,24 @@ export function normalizeRoutineSnapshots(
 		return result;
 	};
 	return { previous: normalize(remapped, current), current: normalize(current, remapped) };
+}
+
+export function deferRoutineBodyValidation(definition: string): string {
+	const dollarQuote = (value: string, label: string) => {
+		let delimiter = `$${label}$`;
+		while (value.includes(delimiter)) delimiter = delimiter.slice(0, -1) + '_$';
+		return `${delimiter}${value}${delimiter}`;
+	};
+	// SQL string bodies may reference tables/columns created later in the migration.
+	// Save and restore the caller's setting within this single statement, including
+	// callers that do not execute the migration inside an explicit transaction.
+	const body = `DECLARE previous_check text := current_setting('check_function_bodies');
+BEGIN
+ PERFORM set_config('check_function_bodies', 'false', true);
+ EXECUTE ${dollarQuote(definition, 'drizzle_definition')};
+ PERFORM set_config('check_function_bodies', previous_check, true);
+END`;
+	return `DO ${dollarQuote(body, 'drizzle_routine')};`;
 }
 
 export function routineRequiresDrop(previous: PgFunction, current: PgFunction): boolean {

@@ -2027,6 +2027,51 @@ export const applyPgSnapshotsDiff = async (
 		}
 	}
 
+	const previousRelations = Object.fromEntries(
+		Object.values({ ...prevFull.tables, ...prevFull.views }).map((relation) => {
+			const schema = renamedSchemas.find((rename) => rename.from.name === (relation.schema || 'public'))?.to.name
+				?? (relation.schema || 'public');
+			return [`${schema}.${relation.name}`, relation];
+		}),
+	);
+	const currentRelations = { ...curFull.tables, ...curFull.views };
+	const routinesByDefinition = new Map(
+		[...Object.values(currentFunctions), ...Object.values(currentProcedures)].map((fn) => [fn.definition, fn]),
+	);
+	const earlyRoutineCreates: JsonStatement[] = [];
+	const lateRoutineCreates: JsonStatement[] = [];
+	const afterViewRoutineCreates: JsonStatement[] = [];
+	const tablesChange = createTables.length > 0 || jsonRenameTables.length > 0 || jsonTableAlternations.length > 0
+		|| jsonAddColumnsStatemets.length > 0 || jsonRenameColumnsStatements.length > 0;
+	const relationsChange = tablesChange || createViews.length > 0 || renameViews.length > 0 || alterViews.length > 0;
+	for (const statement of [...jsonCreateFunctions, ...jsonCreateProcedures]) {
+		if (statement.type !== 'create_function' && statement.type !== 'create_procedure') continue;
+		const fn = routinesByDefinition.get(statement.definition)!;
+		const types = [
+			...(fn.parameters?.map((parameter) => parameter.type) ?? []),
+			...(fn.returnType ? [fn.returnType] : []),
+		];
+		const requiredRelations: { schema: string; name: string; columns: string[] }[] = types.filter((type) =>
+			currentRelations[`${type.schema}.${type.name}`]
+		).map((type) => ({ ...type, columns: [] }));
+		requiredRelations.push(...(fn.relationDependencies ?? []));
+		const missingRelations = requiredRelations.filter((relation) => {
+			const previous = previousRelations[`${relation.schema}.${relation.name}`];
+			return !previous || relation.columns.some((column) => !Object.keys(previous.columns).includes(column));
+		});
+		if (missingRelations.some((relation) => curFull.views[`${relation.schema}.${relation.name}`])) {
+			afterViewRoutineCreates.push(statement);
+			continue;
+		}
+		if (missingRelations.length > 0) {
+			lateRoutineCreates.push(statement);
+			continue;
+		}
+		// Keep routines available to table defaults/checks. String SQL bodies can
+		// mention future relations; defer validation only while creating the routine.
+		earlyRoutineCreates.push(relationsChange ? { ...statement, deferBodyValidation: true } : statement);
+	}
+
 	jsonStatements.push(...createSchemas);
 	jsonStatements.push(...renameSchemas);
 	jsonStatements.push(...createEnums);
@@ -2047,8 +2092,7 @@ export const applyPgSnapshotsDiff = async (
 	jsonStatements.push(...jsonDropTriggers);
 	jsonStatements.push(...jsonDropFunctions);
 	jsonStatements.push(...jsonDropProcedures);
-	jsonStatements.push(...jsonCreateFunctions);
-	jsonStatements.push(...jsonCreateProcedures);
+	jsonStatements.push(...earlyRoutineCreates);
 
 	jsonStatements.push(...createTables);
 
@@ -2078,6 +2122,7 @@ export const applyPgSnapshotsDiff = async (
 	jsonStatements.push(...jsonTableAlternations);
 	jsonStatements.push(...jsonAddedCompositePKs);
 	jsonStatements.push(...jsonAddColumnsStatemets);
+	jsonStatements.push(...lateRoutineCreates);
 
 	jsonStatements.push(...jsonCreateReferencesForCreatedTables);
 	jsonStatements.push(...jsonCreateIndexesForCreatedTables);
@@ -2094,6 +2139,7 @@ export const applyPgSnapshotsDiff = async (
 	jsonStatements.push(...jsonAlteredUniqueConstraints);
 
 	jsonStatements.push(...createViews);
+	jsonStatements.push(...afterViewRoutineCreates);
 
 	jsonStatements.push(...jsonRenamePoliciesStatements);
 	jsonStatements.push(...jsonDropPoliciesStatements);

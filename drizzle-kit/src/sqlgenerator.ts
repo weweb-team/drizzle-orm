@@ -92,7 +92,7 @@ import {
 } from './jsonStatements';
 import { Dialect } from './schemaValidator';
 import { MySqlSquasher } from './serializer/mysqlSchema';
-import { formatRoutineArguments, quoteRoutineIdentifier } from './serializer/pgRoutines';
+import { deferRoutineBodyValidation, formatRoutineArguments, quoteRoutineIdentifier } from './serializer/pgRoutines';
 import { PgSquasher, policy } from './serializer/pgSchema';
 import { SingleStoreSquasher } from './serializer/singlestoreSchema';
 import { SQLiteSchemaSquashed, SQLiteSquasher } from './serializer/sqliteSchema';
@@ -3963,6 +3963,7 @@ class PgCreateFunctionConvertor extends Convertor {
 	}
 
 	convert(st: JsonCreateFunctionStatement): string {
+		if (st.deferBodyValidation) return deferRoutineBodyValidation(st.definition);
 		return st.definition.endsWith(';') ? st.definition : `${st.definition};`;
 	}
 }
@@ -4005,6 +4006,7 @@ class PgCreateProcedureConvertor extends Convertor {
 	}
 
 	convert(st: JsonCreateProcedureStatement): string {
+		if (st.deferBodyValidation) return deferRoutineBodyValidation(st.definition);
 		return st.definition.endsWith(';') ? st.definition : `${st.definition};`;
 	}
 }

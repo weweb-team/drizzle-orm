@@ -63,6 +63,7 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 		beforeEach(async () => {
 			overloadOrder = undefined;
 			for (const pool of [source, target]) {
+				await pool.query('SET check_function_bodies = on');
 				await pool.query(
 					'DROP SCHEMA public CASCADE; CREATE SCHEMA public; DROP SCHEMA IF EXISTS auth CASCADE; DROP SCHEMA IF EXISTS storage CASCADE',
 				);
@@ -489,6 +490,106 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 				await expect(generateMigration(previous, current)).rejects.toThrow('Re-introspect');
 			},
 		);
+
+		it.each(['string', 'atomic'])('creates a table with a %s SQL routine reading it', async (kind) => {
+			await source.query('CREATE TABLE public.items(id integer)');
+			const body = kind === 'atomic'
+				? 'RETURN (SELECT count(*) FROM public.items)'
+				: "AS 'SELECT count(*) FROM public.items'";
+			await source.query(`CREATE FUNCTION public.count_items() RETURNS bigint LANGUAGE sql ${body}`);
+			await source.query('CREATE VIEW public.item_count AS SELECT public.count_items() AS count');
+			await apply(await generate());
+			expect((await target.query('SELECT * FROM public.item_count')).rows).toEqual([{ count: '0' }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it.each(['string', 'atomic'])('creates a %s SQL routine reading a new view', async (kind) => {
+			await source.query('CREATE VIEW public.items AS SELECT 1 AS id');
+			const body = kind === 'atomic' ? 'RETURN (SELECT id FROM public.items)' : "AS 'SELECT id FROM public.items'";
+			await source.query(`CREATE FUNCTION public.watch() RETURNS integer LANGUAGE sql ${body}`);
+			await apply(await generate());
+			expect((await target.query('SELECT public.watch() AS result')).rows).toEqual([{ result: 1 }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it('creates a routine returning the row type of a newly created table', async () => {
+			await source.query(`CREATE TABLE public.items(id integer);
+				CREATE FUNCTION public.all_items() RETURNS SETOF public.items LANGUAGE sql AS 'SELECT * FROM public.items'`);
+			await apply(await generate());
+			await target.query('INSERT INTO public.items VALUES (1)');
+			expect((await target.query('SELECT * FROM public.all_items()')).rows).toEqual([{ id: 1 }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it('recreates a routine after its table argument type is renamed', async () => {
+			for (const client of [source, target]) {
+				await client.query(`CREATE TABLE public.items(id integer);
+				CREATE FUNCTION public.watch(public.items) RETURNS integer LANGUAGE sql AS 'SELECT $1.id'`);
+			}
+			await source.query('ALTER TABLE public.items RENAME TO entries');
+			const conflict = await conflictFor('tables');
+			await apply(
+				await generate({
+					tables: {
+						created: [],
+						deleted: [],
+						renamed: [{ from: conflict.deleted[0], to: conflict.created[0] }],
+						moved: [],
+					},
+				}),
+			);
+			expect((await target.query('SELECT public.watch(ROW(2)::public.entries) AS result')).rows).toEqual([{
+				result: 2,
+			}]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it.each(['on', 'off'])(
+			'creates routines used by table defaults and restores check_function_bodies=%s',
+			async (setting) => {
+				await source.query(
+					`CREATE FUNCTION public.watch() RETURNS text LANGUAGE sql AS $$SELECT '$drizzle_definition$:$drizzle_routine$'::text$$;
+				CREATE TABLE public.notes(value text DEFAULT public.watch())`,
+				);
+				await target.query(`SET check_function_bodies = ${setting}`);
+				await apply(await generate());
+				expect((await target.query('SHOW check_function_bodies')).rows).toEqual([{ check_function_bodies: setting }]);
+				expect((await target.query('INSERT INTO public.notes DEFAULT VALUES RETURNING value')).rows).toEqual([{
+					value: '$drizzle_definition$:$drizzle_routine$',
+				}]);
+				expect(await generate()).toEqual([]);
+			},
+		);
+
+		it('replaces a standard SQL body after adding a column it references', async () => {
+			for (const client of [source, target]) {
+				await client.query(`CREATE TABLE public.items(id integer); INSERT INTO public.items VALUES (1);
+				CREATE FUNCTION public.watch() RETURNS integer LANGUAGE sql RETURN (SELECT id FROM public.items LIMIT 1)`);
+			}
+			await source.query(`ALTER TABLE public.items ADD COLUMN extra integer DEFAULT 5;
+				CREATE OR REPLACE FUNCTION public.watch() RETURNS integer LANGUAGE sql RETURN (SELECT extra FROM public.items LIMIT 1)`);
+			await apply(await generate());
+			expect((await target.query('SELECT public.watch() AS result')).rows).toEqual([{ result: 5 }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it.each([false, true])('rejects an ambiguous legacy current snapshot (changed body: %s)', async (changed) => {
+			await target.query(`CREATE FUNCTION public.watch(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1';
+				CREATE FUNCTION public.watch(text) RETURNS text LANGUAGE sql AS 'SELECT $1'`);
+			await source.query(
+				`CREATE FUNCTION public.watch(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1${changed ? ' + 1' : ''}'`,
+			);
+			const previous = await readSnapshot(target);
+			const current = await readSnapshot(source);
+			current.functions = Object.fromEntries(
+				Object.values(current.functions).map((
+					fn,
+				) => [`${fn.schema}.${fn.name}`, { schema: fn.schema, name: fn.name, definition: fn.definition }]),
+			);
+			await expect(generateMigration(previous, current)).rejects.toThrow('Re-introspect');
+			expect((await target.query("SELECT count(*)::integer AS remaining FROM pg_proc WHERE proname = 'watch'")).rows)
+				.toEqual([{ remaining: 2 }]);
+		});
 
 		it('accepts unchanged legacy snapshots and requests re-introspection before destructive legacy diffs', async () => {
 			for (const client of [source, target]) {

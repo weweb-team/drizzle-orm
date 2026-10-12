@@ -804,6 +804,7 @@ export interface JsonCreateFunctionStatement {
 	name: string;
 	schema: string;
 	definition: string;
+	deferBodyValidation?: boolean;
 }
 
 export interface JsonDropFunctionStatement {
@@ -833,6 +834,7 @@ export interface JsonCreateProcedureStatement {
 	name: string;
 	schema: string;
 	definition: string;
+	deferBodyValidation?: boolean;
 }
 
 export interface JsonDropProcedureStatement {

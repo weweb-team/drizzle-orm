@@ -330,10 +330,16 @@ to retain grants and dependent objects. Removed routines and incompatible parame
 use signature-specific drops.
 
 Unchanged legacy user routines can be matched by their exact definitions. Re-introspect both
-snapshots created before `0.32.0-weweb.7` when an old routine has no exact fresh match. This includes
+snapshots created before `0.32.0-weweb.7` when an old routine has no unique exact match or the
+comparison contains several overloads of that name. This includes
 extension-owned routines now excluded from fresh snapshots, even if the live database is unchanged.
 Old name-only entries cannot safely identify an overload or prove extension ownership. Callers
 that introspect both databases before each migration do not need a stored-snapshot upgrade.
+
+Routines needed by table definitions remain available before table DDL. SQL string-body validation
+is deferred within a single statement when relations change, preserving the caller's setting.
+Routines requiring newly created or renamed table row types, columns, or views are created after
+those dependencies exist. PostgreSQL's catalog records dependencies for standard SQL bodies.
 
 ### `generateMigration(prev, cur, decisions?)`
 

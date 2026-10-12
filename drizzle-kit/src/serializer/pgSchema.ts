@@ -170,6 +170,8 @@ export const functionSchema = object({
 	returnType: routineTypeSchema.optional(),
 	returnsSet: boolean().optional(),
 	defaultCount: number().optional(),
+	relationDependencies: array(object({ schema: string(), name: string(), columns: array(string()) }).strict())
+		.optional(),
 }).strict();
 
 export const triggerSchema = object({
