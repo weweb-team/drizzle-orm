@@ -10,6 +10,7 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 		throw new Error('DRIZZLE_FUNCTION_TEST_DATABASE_URL is required for PostgreSQL routine contracts');
 	}
 	let overloadOrder: string | undefined;
+	let jsonMetadataAsText = false;
 
 	async function readSnapshot(client: Client, direction = 'ASC') {
 		const db = {
@@ -23,7 +24,15 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 						`ORDER BY n.nspname, p.proname, p.oid ${direction}`,
 					);
 				}
-				return (await client.query(sql, params)).rows;
+				const rows = (await client.query(sql, params)).rows;
+				if (jsonMetadataAsText) {
+					for (const row of rows) {
+						for (const key of ['parameters', 'returnType', 'relationDependencies', 'routineDependencies']) {
+							if (row[key] !== undefined) row[key] = JSON.stringify(row[key]);
+						}
+					}
+				}
+				return rows;
 			},
 		};
 		return { id: originUUID, prevId: '', ...await introspectPostgres(db, () => true, ['public', 'auth', 'storage']) };
@@ -62,6 +71,7 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 
 		beforeEach(async () => {
 			overloadOrder = undefined;
+			jsonMetadataAsText = false;
 			for (const pool of [source, target]) {
 				await pool.query('SET check_function_bodies = on');
 				await pool.query(
@@ -833,6 +843,18 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 				expect(await generate()).toEqual([]);
 			},
 		);
+
+		it('migrates routines when a driver returns JSON metadata as strings', async () => {
+			await source.query(`CREATE TABLE public.items(id integer);
+				CREATE FUNCTION public.z_count() RETURNS bigint LANGUAGE sql RETURN (SELECT count(*) FROM public.items);
+				CREATE FUNCTION public.a_caller() RETURNS bigint LANGUAGE sql RETURN public.z_count();
+				CREATE PROCEDURE public.note(integer) LANGUAGE plpgsql AS 'BEGIN NULL; END'`);
+			jsonMetadataAsText = true;
+			await apply(await generate());
+			expect((await target.query('SELECT public.a_caller() AS result')).rows).toEqual([{ result: '0' }]);
+			await target.query('CALL public.note(1)');
+			expect(await generate()).toEqual([]);
+		});
 
 		it('accepts unchanged legacy snapshots and requests re-introspection before destructive legacy diffs', async () => {
 			for (const client of [source, target]) {

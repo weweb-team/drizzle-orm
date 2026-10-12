@@ -98,8 +98,17 @@ export async function introspectPgRoutines(db: DB, schemaFilters: string[]) {
 	ORDER BY n.nspname, p.proname, parameters`);
 	const functions: Record<string, PgFunction> = {};
 	const procedures: Record<string, PgFunction> = {};
-	for (const { kind, ...fn } of routines) {
-		if (!fn.definition) continue;
+	// RDS Data API returns JSON as stringValue; other PostgreSQL drivers decode it.
+	const decodeJson = <T>(value: T | string): T => typeof value === 'string' ? JSON.parse(value) : value;
+	for (const { kind, ...row } of routines) {
+		if (!row.definition) continue;
+		const fn: PgFunction = {
+			...row,
+			parameters: decodeJson(row.parameters),
+			returnType: decodeJson(row.returnType),
+			relationDependencies: decodeJson(row.relationDependencies),
+			routineDependencies: decodeJson(row.routineDependencies),
+		};
 		const destination = kind === 'f' ? functions : procedures;
 		destination[routineKey(fn)] = fn;
 	}
