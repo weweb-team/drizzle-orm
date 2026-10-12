@@ -467,6 +467,29 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 			expect(await generate()).toEqual([]);
 		});
 
+		it.each(['FUNCTION', 'PROCEDURE'])(
+			'requires fresh signatures when both legacy snapshots change a %s',
+			async (kind) => {
+				const body = kind === 'FUNCTION'
+					? "RETURNS integer LANGUAGE sql AS 'SELECT 1'"
+					: "LANGUAGE plpgsql AS 'BEGIN NULL; END'";
+				await target.query(`CREATE ${kind} public.watch(integer) ${body}`);
+				await source.query(`CREATE ${kind} public.watch(text) ${body}`);
+				const previous = await readSnapshot(target);
+				const current = await readSnapshot(source);
+				const routines = kind === 'FUNCTION' ? 'functions' : 'procedures';
+				for (const snapshot of [previous, current]) {
+					snapshot[routines] = Object.fromEntries(
+						Object.values(snapshot[routines]).map((fn) => [
+							`${fn.schema}.${fn.name}`,
+							{ name: fn.name, schema: fn.schema, definition: fn.definition },
+						]),
+					);
+				}
+				await expect(generateMigration(previous, current)).rejects.toThrow('Re-introspect');
+			},
+		);
+
 		it('accepts unchanged legacy snapshots and requests re-introspection before destructive legacy diffs', async () => {
 			for (const client of [source, target]) {
 				await client.query(`CREATE FUNCTION public.watch(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1'`);

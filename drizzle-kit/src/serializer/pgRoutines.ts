@@ -4,15 +4,19 @@ import type { Function as PgFunction, RoutineType } from './pgSchema';
 
 export const quoteRoutineIdentifier = (name: string) => `"${name.replaceAll('"', '""')}"`;
 
-export function inputArgumentTypes(fn: PgFunction): RoutineType[] {
+function requireRoutineParameters(fn: PgFunction) {
 	if (!fn.parameters) {
 		throw new Error(
-			`Re-introspect both PostgreSQL snapshots before dropping ${fn.schema}.${fn.name}: legacy entries lack argument signatures and extension ownership.`,
+			`Re-introspect both PostgreSQL snapshots before migrating ${fn.schema}.${fn.name}: legacy entries lack argument signatures and extension ownership.`,
 		);
 	}
-	return fn.parameters.filter((parameter) => parameter.mode !== 'o' && parameter.mode !== 't').map((parameter) =>
-		parameter.type
-	);
+	return fn.parameters;
+}
+
+export function inputArgumentTypes(fn: PgFunction): RoutineType[] {
+	return requireRoutineParameters(fn).filter((parameter) => parameter.mode !== 'o' && parameter.mode !== 't').map((
+		parameter,
+	) => parameter.type);
 }
 
 export function routineKey(fn: PgFunction): string {
@@ -130,8 +134,11 @@ export function normalizeRoutineSnapshots(
 }
 
 export function routineRequiresDrop(previous: PgFunction, current: PgFunction): boolean {
-	// CREATE OR REPLACE preserves grants and dependencies for body/default changes.
-	return JSON.stringify(previous.parameters) !== JSON.stringify(current.parameters)
+	// A replacement also needs known signatures; two legacy entries cannot prove compatibility.
+	const previousParameters = requireRoutineParameters(previous);
+	const currentParameters = requireRoutineParameters(current);
+	// CREATE OR REPLACE preserves grants and dependencies for compatible body/default changes.
+	return JSON.stringify(previousParameters) !== JSON.stringify(currentParameters)
 		|| JSON.stringify(previous.returnType) !== JSON.stringify(current.returnType)
 		|| previous.returnsSet !== current.returnsSet
 		|| (current.defaultCount ?? 0) < (previous.defaultCount ?? 0);
