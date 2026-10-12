@@ -340,6 +340,9 @@ Routines needed by table definitions remain available before table DDL. SQL stri
 is deferred within a single statement when relations change, preserving the caller's setting.
 Routines requiring newly created or renamed table row types, columns, or views are created after
 those dependencies exist. PostgreSQL's catalog records dependencies for standard SQL bodies.
+Recursive standard SQL definitions are emitted for initial introspection too. Replaying those
+definitions into an empty database requires manually creating placeholder routines first, as
+PostgreSQL must resolve their parsed bodies at creation time.
 
 ### `generateMigration(prev, cur, decisions?)`
 

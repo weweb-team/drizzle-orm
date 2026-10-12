@@ -638,6 +638,42 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 			expect(await generate()).toEqual([]);
 		});
 
+		it('emits a new recursive standard SQL routine for initial migration introspection', async () => {
+			await source.query(`CREATE FUNCTION public.fact(n integer) RETURNS integer LANGUAGE sql RETURN 1;
+				CREATE OR REPLACE FUNCTION public.fact(n integer) RETURNS integer LANGUAGE sql
+				RETURN CASE WHEN n <= 1 THEN 1 ELSE n * public.fact(n - 1) END`);
+			const snapshot = await readSnapshot(source);
+			const fn = Object.values(snapshot.functions!)[0];
+			expect(fn.routineDependencies?.some((dependency) => dependency.name === 'fact')).toBe(true);
+			const statements = await generate();
+			expect(statements).toEqual([`${fn.definition};`]);
+			// Parsed recursive bodies need a placeholder when replayed into an empty database.
+			await target.query('CREATE FUNCTION public.fact(n integer) RETURNS integer LANGUAGE sql RETURN 1');
+			await apply(statements);
+			expect((await target.query('SELECT public.fact(5) AS result')).rows).toEqual([{ result: 120 }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it('emits cyclic routine dependencies after their required relations for initial introspection', async () => {
+			await source.query(`CREATE VIEW public.items AS SELECT 3 AS id;
+				CREATE FUNCTION public.a_caller(integer) RETURNS integer LANGUAGE sql RETURN 0;
+				CREATE FUNCTION public.z_callee(integer) RETURNS integer LANGUAGE sql
+				RETURN CASE WHEN $1 = 0 THEN (SELECT id FROM public.items) ELSE public.a_caller($1 - 1) END;
+				CREATE OR REPLACE FUNCTION public.a_caller(integer) RETURNS integer LANGUAGE sql RETURN public.z_callee($1);
+				CREATE FUNCTION public.b_outer(integer) RETURNS integer LANGUAGE sql RETURN public.a_caller($1)`);
+			const statements = await generate();
+			const viewIndex = statements.findIndex((statement) => statement.includes('CREATE VIEW'));
+			const functions = statements.filter((statement) => statement.includes('CREATE OR REPLACE FUNCTION'));
+			expect(functions).toHaveLength(3);
+			for (const statement of functions) expect(statements.indexOf(statement)).toBeGreaterThan(viewIndex);
+			// Bootstrap the cycle explicitly; SQL emission must still work for `pull`.
+			await target.query(`CREATE FUNCTION public.a_caller(integer) RETURNS integer LANGUAGE sql RETURN 0;
+				CREATE FUNCTION public.z_callee(integer) RETURNS integer LANGUAGE sql RETURN 0`);
+			await apply(statements);
+			expect((await target.query('SELECT public.b_outer(2) AS result')).rows).toEqual([{ result: 3 }]);
+			expect(await generate()).toEqual([]);
+		});
+
 		it('defers string-body checks for a table-typed routine that reads a new view', async () => {
 			await source.query(`CREATE TABLE public.items(id integer);
 				CREATE VIEW public.items_view AS SELECT * FROM public.items;

@@ -2105,7 +2105,9 @@ export const applyPgSnapshotsDiff = async (
 	const readyRoutines: string[] = [];
 	for (const [key, node] of creationNodes) {
 		const dependencies = new Set(
-			node.dependencies.filter((dependency) => !availableRoutines.has(dependency) && creationNodes.has(dependency)),
+			node.dependencies.filter((dependency) =>
+				dependency !== key && !availableRoutines.has(dependency) && creationNodes.has(dependency)
+			),
 		);
 		remainingDependencies.set(key, dependencies.size);
 		if (dependencies.size === 0) readyRoutines.push(key);
@@ -2127,7 +2129,12 @@ export const applyPgSnapshotsDiff = async (
 		}
 	}
 	if (orderedRoutines.length !== creationNodes.size) {
-		throw new Error('Cyclic routine creation dependencies require an explicit migration.');
+		// `pull` also generates SQL from an empty snapshot. Emit cyclic definitions so
+		// introspection still succeeds; replaying parsed recursive bodies needs placeholders.
+		const unresolved = [...creationNodes].filter(([key]) => remainingDependencies.get(key)! > 0);
+		let phase = 0;
+		for (const [, node] of unresolved) phase = Math.max(phase, node.phase);
+		for (const [, node] of unresolved) orderedRoutines.push({ ...node, phase });
 	}
 	for (const node of orderedRoutines) {
 		const destination = node.phase === 2
