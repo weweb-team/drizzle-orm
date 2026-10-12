@@ -7,7 +7,7 @@ export const quoteRoutineIdentifier = (name: string) => `"${name.replaceAll('"',
 export function inputArgumentTypes(fn: PgFunction): RoutineType[] {
 	if (!fn.parameters) {
 		throw new Error(
-			`Re-introspect the PostgreSQL snapshot before dropping ${fn.schema}.${fn.name}: argument signatures are missing.`,
+			`Re-introspect both PostgreSQL snapshots before dropping ${fn.schema}.${fn.name}: legacy entries lack argument signatures and extension ownership.`,
 		);
 	}
 	return fn.parameters.filter((parameter) => parameter.mode !== 'o' && parameter.mode !== 't').map((parameter) =>
@@ -41,6 +41,7 @@ export async function introspectPgRoutines(db: DB, schemaFilters: string[]) {
 		n.nspname AS schema, p.proname AS name, p.prokind AS kind,
 		pg_catalog.pg_get_functiondef(p.oid) AS definition,
 		p.proretset AS "returnsSet",
+		p.pronargdefaults AS "defaultCount",
 		${typeExpression('return_type', 'return_namespace', 'return_element', 'return_element_namespace')} AS "returnType",
 		COALESCE((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
 			'name', COALESCE(p.proargnames[argument.position], ''),
@@ -113,7 +114,13 @@ export function normalizeRoutineSnapshots(
 					other.parameters && other.schema === fn.schema && other.name === fn.name && other.definition === fn.definition
 				);
 			const normalized = match
-				? { ...fn, parameters: match.parameters, returnType: match.returnType, returnsSet: match.returnsSet }
+				? {
+					...fn,
+					parameters: match.parameters,
+					returnType: match.returnType,
+					returnsSet: match.returnsSet,
+					defaultCount: match.defaultCount,
+				}
 				: fn;
 			result[routineKey(normalized)] = normalized;
 		}
@@ -126,5 +133,6 @@ export function routineRequiresDrop(previous: PgFunction, current: PgFunction): 
 	// CREATE OR REPLACE preserves grants and dependencies for body/default changes.
 	return JSON.stringify(previous.parameters) !== JSON.stringify(current.parameters)
 		|| JSON.stringify(previous.returnType) !== JSON.stringify(current.returnType)
-		|| previous.returnsSet !== current.returnsSet;
+		|| previous.returnsSet !== current.returnsSet
+		|| (current.defaultCount ?? 0) < (previous.defaultCount ?? 0);
 }

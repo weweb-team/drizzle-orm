@@ -169,6 +169,7 @@ export const functionSchema = object({
 	parameters: array(object({ name: string(), mode: string(), type: routineTypeSchema }).strict()).optional(),
 	returnType: routineTypeSchema.optional(),
 	returnsSet: boolean().optional(),
+	defaultCount: number().optional(),
 }).strict();
 
 export const triggerSchema = object({

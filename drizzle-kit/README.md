@@ -329,9 +329,11 @@ routines that depend on extensions remain included. Body-only changes use `CREAT
 to retain grants and dependent objects. Removed routines and incompatible parameter/return changes
 use signature-specific drops.
 
-Unchanged legacy routine snapshots remain readable. Re-introspect snapshots created before
-`0.32.0-weweb.7` before changing or removing routines: the old name-only entries cannot safely
-identify which overload to drop.
+Unchanged legacy user routines can be matched by their exact definitions. Re-introspect both
+snapshots created before `0.32.0-weweb.7` when an old routine has no exact fresh match. This includes
+extension-owned routines now excluded from fresh snapshots, even if the live database is unchanged.
+Old name-only entries cannot safely identify an overload or prove extension ownership. Callers
+that introspect both databases before each migration do not need a stored-snapshot upgrade.
 
 ### `generateMigration(prev, cur, decisions?)`
 

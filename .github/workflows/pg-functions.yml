@@ -36,6 +36,7 @@ jobs:
           --health-retries 10
     env:
       DRIZZLE_FUNCTION_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/drizzle_test
+      DRIZZLE_FUNCTION_TEST_REQUIRED: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

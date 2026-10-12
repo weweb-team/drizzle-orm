@@ -6,7 +6,9 @@ import type { AllDecisions } from '../../src/migrationState';
 export function runPgRoutineContract(api: typeof import('../../src/api')) {
 	const { introspectPostgres, generateMigration, ConflictNeedsResolutionError, originUUID } = api;
 	const databaseUrl = process.env.DRIZZLE_FUNCTION_TEST_DATABASE_URL;
-	if (process.env.CI && !databaseUrl) throw new Error('DRIZZLE_FUNCTION_TEST_DATABASE_URL is required in CI');
+	if (process.env.DRIZZLE_FUNCTION_TEST_REQUIRED === '1' && !databaseUrl) {
+		throw new Error('DRIZZLE_FUNCTION_TEST_DATABASE_URL is required for PostgreSQL routine contracts');
+	}
 	let overloadOrder: string | undefined;
 
 	async function readSnapshot(client: Client, direction = 'ASC') {
@@ -408,6 +410,60 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 			await source.query(`CREATE EXTENSION vector;
             CREATE PROCEDURE public.extension_watch(integer) LANGUAGE plpgsql AS 'BEGIN NULL; END';
             ALTER EXTENSION vector ADD PROCEDURE public.extension_watch(integer)`);
+			expect(await generate()).toEqual([]);
+		});
+
+		it.each(['FUNCTION', 'PROCEDURE'])('recreates a %s when a parameter default is removed', async (kind) => {
+			const body = kind === 'FUNCTION'
+				? "RETURNS integer LANGUAGE sql AS 'SELECT value'"
+				: "LANGUAGE plpgsql AS 'BEGIN NULL; END'";
+			for (const client of [source, target]) {
+				await client.query(`CREATE ${kind} public.watch(value integer DEFAULT 1) ${body}`);
+			}
+			await source.query(`DROP ${kind} public.watch(integer); CREATE ${kind} public.watch(value integer) ${body}`);
+			const statements = await generate();
+			await apply(statements);
+			expect(statements.some((statement) => statement.startsWith(`DROP ${kind}`))).toBe(true);
+			expect(await generate()).toEqual([]);
+		});
+
+		it.each(['FUNCTION', 'PROCEDURE'])('recreates a %s when only an earlier default is removed', async (kind) => {
+			const body = kind === 'FUNCTION'
+				? "RETURNS integer LANGUAGE sql AS 'SELECT first + second'"
+				: "LANGUAGE plpgsql AS 'BEGIN NULL; END'";
+			for (const client of [source, target]) {
+				await client.query(`CREATE ${kind} public.watch(first integer DEFAULT 1, second integer DEFAULT 2) ${body}`);
+			}
+			await source.query(`DROP ${kind} public.watch(integer, integer);
+				CREATE ${kind} public.watch(first integer, second integer DEFAULT 2) ${body}`);
+			const statements = await generate();
+			await apply(statements);
+			expect(statements.some((statement) => statement.startsWith(`DROP ${kind}`))).toBe(true);
+			expect(await generate()).toEqual([]);
+		});
+
+		it.each(['FUNCTION', 'PROCEDURE'])('replaces a %s without dropping it when defaults are added', async (kind) => {
+			const body = kind === 'FUNCTION'
+				? "RETURNS integer LANGUAGE sql AS 'SELECT value'"
+				: "LANGUAGE plpgsql AS 'BEGIN NULL; END'";
+			for (const client of [source, target]) await client.query(`CREATE ${kind} public.watch(value integer) ${body}`);
+			await source.query(`CREATE OR REPLACE ${kind} public.watch(value integer DEFAULT 1) ${body}`);
+			const statements = await generate();
+			expect(statements).toHaveLength(1);
+			expect(statements[0]).toMatch(/^CREATE OR REPLACE/);
+			await apply(statements);
+			expect(await generate()).toEqual([]);
+		});
+
+		it('requests fresh snapshots when legacy extension members cannot be identified safely', async () => {
+			for (const client of [source, target]) await client.query('CREATE EXTENSION vector');
+			const previous = await readSnapshot(target);
+			const rows =
+				(await target.query(`SELECT n.nspname AS schema, p.proname AS name, pg_get_functiondef(p.oid) AS definition
+				FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.prokind = 'f' AND n.nspname = 'public'`))
+					.rows;
+			previous.functions = Object.fromEntries(rows.map((fn) => [`${fn.schema}.${fn.name}`, fn]));
+			await expect(generateMigration(previous, await readSnapshot(source))).rejects.toThrow('extension ownership');
 			expect(await generate()).toEqual([]);
 		});
 
