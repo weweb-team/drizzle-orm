@@ -1,0 +1,86 @@
+name: PostgreSQL routine migrations
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pg-functions-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Kit checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check formatting
+        run: pnpm lint
+      - name: Build ORM runtime
+        run: pnpm --filter drizzle-orm build
+      - name: Run PostgreSQL schema diff unit tests
+        run: >-
+          pnpm --filter @weweb/drizzle-kit exec vitest run
+          tests/pg-enums.test.ts tests/pg-schemas.test.ts tests/pg-tables.test.ts
+          tests/pg-columns.test.ts tests/pg-views.test.ts tests/pg-sequences.test.ts
+
+  migrations:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [16, 18]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: drizzle_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d drizzle_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DRIZZLE_FUNCTION_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/drizzle_test
+      DRIZZLE_FUNCTION_TEST_REQUIRED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build ORM runtime
+        run: pnpm --filter drizzle-orm build
+      - name: Typecheck Kit
+        run: pnpm --filter @weweb/drizzle-kit tsc
+      - name: Run PostgreSQL and pgvector migration regressions
+        run: pnpm --filter @weweb/drizzle-kit test:pg-functions
+      - name: Build distributable Kit package
+        run: pnpm --filter @weweb/drizzle-kit build
+      - name: Run regressions against the built CommonJS API used by weweb-back
+        env:
+          DRIZZLE_FUNCTION_TEST_PACKAGE: '1'
+        run: pnpm --filter @weweb/drizzle-kit exec vitest run tests/pg-functions.package.test.ts

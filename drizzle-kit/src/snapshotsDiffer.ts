@@ -13,6 +13,7 @@ import {
 	ZodTypeAny,
 } from 'zod';
 import { applyJsonDiff, diffColumns, diffIndPolicies, diffPolicies, diffSchemasOrTables } from './jsonDiffer';
+import { normalizeRoutineSnapshots, routineKey, routineRequiresDrop } from './serializer/pgRoutines';
 import { fromJson } from './sqlgenerator';
 
 import {
@@ -69,13 +70,16 @@ import {
 	prepareAlterRoleJson,
 	prepareAlterSequenceJson,
 	prepareCreateEnumJson,
+	prepareCreateFunctionJson,
 	prepareCreateIndexesJson,
 	prepareCreateIndPolicyJsons,
 	prepareCreatePolicyJsons,
+	prepareCreateProcedureJson,
 	prepareCreateReferencesJson,
 	prepareCreateRoleJson,
 	prepareCreateSchemasJson,
 	prepareCreateSequenceJson,
+	prepareCreateTriggerJson,
 	prepareDeleteCheckConstraint,
 	prepareDeleteCompositePrimaryKeyMySql,
 	prepareDeleteCompositePrimaryKeyPg,
@@ -84,13 +88,16 @@ import {
 	prepareDeleteUniqueConstraintPg as prepareDeleteUniqueConstraint,
 	prepareDropEnumJson,
 	prepareDropEnumValues,
+	prepareDropFunctionJson,
 	prepareDropIndexesJson,
 	prepareDropIndPolicyJsons,
 	prepareDropPolicyJsons,
+	prepareDropProcedureJson,
 	prepareDropReferencesJson,
 	prepareDropRoleJson,
 	prepareDropSequenceJson,
 	prepareDropTableJson,
+	prepareDropTriggerJson,
 	prepareDropViewJson,
 	prepareLibSQLCreateReferencesJson,
 	prepareLibSQLDropReferencesJson,
@@ -121,12 +128,6 @@ import {
 	prepareSqliteAlterColumns,
 	prepareSQLiteCreateTable,
 	prepareSqliteCreateViewJson,
-	prepareCreateFunctionJson,
-	prepareDropFunctionJson,
-	prepareCreateTriggerJson,
-	prepareDropTriggerJson,
-	prepareCreateProcedureJson,
-	prepareDropProcedureJson,
 } from './jsonStatements';
 
 import { Named, NamedWithSchema } from './cli/commands/migrate';
@@ -1958,19 +1959,28 @@ export const applyPgSnapshotsDiff = async (
 	const jsonCreateProcedures: JsonStatement[] = [];
 	const jsonDropProcedures: JsonStatement[] = [];
 
-	const functionsDiff = diffSchemasOrTables(json1.functions ?? {}, json2.functions ?? {});
+	const { previous: previousFunctions, current: currentFunctions, drops: functionDrops } = normalizeRoutineSnapshots(
+		json1.functions ?? {},
+		json2.functions ?? {},
+		renamedSchemas,
+		renamedEnums,
+		movedEnums,
+		[...renamedTables, ...renamedViews],
+		[...movedTables, ...movedViews],
+	);
+	const functionsDiff = diffSchemasOrTables(previousFunctions, currentFunctions);
 	for (const func of functionsDiff.added) {
 		jsonCreateFunctions.push(prepareCreateFunctionJson(func));
 	}
 	for (const func of functionsDiff.deleted) {
-		jsonDropFunctions.push(prepareDropFunctionJson(func));
+		jsonDropFunctions.push(prepareDropFunctionJson(functionDrops[routineKey(func)] ?? func));
 	}
-	for (const key of Object.keys(json1.functions ?? {})) {
-		if (json2.functions?.[key]) {
-			const prev = json1.functions![key];
-			const cur = json2.functions[key];
+	for (const key of Object.keys(previousFunctions)) {
+		if (currentFunctions[key]) {
+			const prev = previousFunctions[key];
+			const cur = currentFunctions[key];
 			if (prev.definition !== cur.definition) {
-				jsonDropFunctions.push(prepareDropFunctionJson(prev));
+				if (routineRequiresDrop(prev, cur)) jsonDropFunctions.push(prepareDropFunctionJson(functionDrops[key] ?? prev));
 				jsonCreateFunctions.push(prepareCreateFunctionJson(cur));
 			}
 		}
@@ -1994,22 +2004,145 @@ export const applyPgSnapshotsDiff = async (
 		}
 	}
 
-	const proceduresDiff = diffSchemasOrTables(json1.procedures ?? {}, json2.procedures ?? {});
+	const { previous: previousProcedures, current: currentProcedures, drops: procedureDrops } = normalizeRoutineSnapshots(
+		json1.procedures ?? {},
+		json2.procedures ?? {},
+		renamedSchemas,
+		renamedEnums,
+		movedEnums,
+		[...renamedTables, ...renamedViews],
+		[...movedTables, ...movedViews],
+	);
+	const proceduresDiff = diffSchemasOrTables(previousProcedures, currentProcedures);
 	for (const proc of proceduresDiff.added) {
 		jsonCreateProcedures.push(prepareCreateProcedureJson(proc));
 	}
 	for (const proc of proceduresDiff.deleted) {
-		jsonDropProcedures.push(prepareDropProcedureJson(proc));
+		jsonDropProcedures.push(prepareDropProcedureJson(procedureDrops[routineKey(proc)] ?? proc));
 	}
-	for (const key of Object.keys(json1.procedures ?? {})) {
-		if (json2.procedures?.[key]) {
-			const prev = json1.procedures![key];
-			const cur = json2.procedures[key];
+	for (const key of Object.keys(previousProcedures)) {
+		if (currentProcedures[key]) {
+			const prev = previousProcedures[key];
+			const cur = currentProcedures[key];
 			if (prev.definition !== cur.definition) {
-				jsonDropProcedures.push(prepareDropProcedureJson(prev));
+				if (routineRequiresDrop(prev, cur)) {
+					jsonDropProcedures.push(prepareDropProcedureJson(procedureDrops[key] ?? prev));
+				}
 				jsonCreateProcedures.push(prepareCreateProcedureJson(cur));
 			}
 		}
+	}
+
+	const previousRelations = Object.fromEntries(
+		Object.values({ ...prevFull.tables, ...prevFull.views }).map((relation) => {
+			const schema = renamedSchemas.find((rename) => rename.from.name === (relation.schema || 'public'))?.to.name
+				?? (relation.schema || 'public');
+			return [`${schema}.${relation.name}`, relation];
+		}),
+	);
+	const currentRelations = { ...curFull.tables, ...curFull.views };
+	const recreatedViews = new Set(dropViews.map((view) => JSON.stringify([view.schema || 'public', view.name])));
+	const retypedColumns = new Set(jsonTableAlternations.flatMap((statement) => {
+		if (
+			statement.type !== 'alter_table_alter_column_set_type'
+			&& statement.type !== 'pg_alter_table_alter_column_set_type'
+		) return [];
+		return [JSON.stringify([statement.schema || 'public', statement.tableName, statement.columnName])];
+	}));
+	const routinesByDefinition = new Map(
+		[...Object.values(currentFunctions), ...Object.values(currentProcedures)].map((fn) => [fn.definition, fn]),
+	);
+	const earlyRoutineCreates: JsonStatement[] = [];
+	const lateRoutineCreates: JsonStatement[] = [];
+	const afterViewRoutineCreates: JsonStatement[] = [];
+	const tablesChange = createTables.length > 0 || jsonRenameTables.length > 0 || jsonTableAlternations.length > 0
+		|| jsonAddColumnsStatemets.length > 0 || jsonRenameColumnsStatements.length > 0
+		|| jsonSetTableSchemas.length > 0 || jsonDropTables.length > 0 || jsonDropColumnsStatemets.length > 0;
+	const relationsChange = tablesChange || createViews.length > 0 || renameViews.length > 0 || alterViews.length > 0
+		|| dropViews.length > 0;
+	const creationNodes = new Map<string, { statement: JsonStatement; phase: number; dependencies: string[] }>();
+	for (const statement of [...jsonCreateFunctions, ...jsonCreateProcedures]) {
+		if (statement.type !== 'create_function' && statement.type !== 'create_procedure') continue;
+		const fn = routinesByDefinition.get(statement.definition)!;
+		const types = [
+			...(fn.parameters?.map((parameter) => parameter.type) ?? []),
+			...(fn.returnType ? [fn.returnType] : []),
+		];
+		const requiredRelations: { schema: string; name: string; columns: string[] }[] = types.filter((type) =>
+			currentRelations[`${type.schema}.${type.name}`]
+		).map((type) => ({ ...type, columns: [] }));
+		requiredRelations.push(...(fn.relationDependencies ?? []));
+		const missingRelations = requiredRelations.filter((relation) => {
+			if (recreatedViews.has(JSON.stringify([relation.schema, relation.name]))) return true;
+			const previous = previousRelations[`${relation.schema}.${relation.name}`];
+			return !previous || relation.columns.some((column) =>
+				!Object.keys(previous.columns).includes(column)
+				|| retypedColumns.has(JSON.stringify([relation.schema, relation.name, column]))
+			);
+		});
+		const phase = missingRelations.some((relation) => curFull.views[`${relation.schema}.${relation.name}`])
+			? 2
+			: missingRelations.length > 0
+			? 1
+			: 0;
+		creationNodes.set(routineKey(fn), {
+			statement: relationsChange ? { ...statement, deferBodyValidation: true } : statement,
+			phase,
+			dependencies: (fn.routineDependencies ?? []).map((dependency) =>
+				JSON.stringify([dependency.schema, dependency.name, dependency.argumentTypes])
+			).sort(),
+		});
+	}
+	const availableRoutines = new Set(
+		[...Object.values(functionDrops), ...Object.values(procedureDrops)].map(routineKey),
+	);
+	for (const statement of [...jsonDropFunctions, ...jsonDropProcedures]) {
+		if (statement.type !== 'drop_function' && statement.type !== 'drop_procedure') continue;
+		availableRoutines.delete(JSON.stringify([statement.schema, statement.name, statement.argumentTypes]));
+	}
+	const remainingDependencies = new Map<string, number>();
+	const callersByDependency = new Map<string, string[]>();
+	const readyRoutines: string[] = [];
+	for (const [key, node] of creationNodes) {
+		const dependencies = new Set(
+			node.dependencies.filter((dependency) =>
+				dependency !== key && !availableRoutines.has(dependency) && creationNodes.has(dependency)
+			),
+		);
+		remainingDependencies.set(key, dependencies.size);
+		if (dependencies.size === 0) readyRoutines.push(key);
+		for (const dependency of dependencies) {
+			if (!callersByDependency.has(dependency)) callersByDependency.set(dependency, []);
+			callersByDependency.get(dependency)!.push(key);
+		}
+	}
+	const orderedRoutines: { statement: JsonStatement; phase: number }[] = [];
+	for (const key of readyRoutines) {
+		const node = creationNodes.get(key)!;
+		orderedRoutines.push(node);
+		for (const caller of callersByDependency.get(key) ?? []) {
+			const callerNode = creationNodes.get(caller)!;
+			callerNode.phase = Math.max(callerNode.phase, node.phase);
+			const remaining = remainingDependencies.get(caller)! - 1;
+			remainingDependencies.set(caller, remaining);
+			if (remaining === 0) readyRoutines.push(caller);
+		}
+	}
+	if (orderedRoutines.length !== creationNodes.size) {
+		// `pull` also generates SQL from an empty snapshot. Emit cyclic definitions so
+		// introspection still succeeds; replaying parsed recursive bodies needs placeholders.
+		const unresolved = [...creationNodes].filter(([key]) => remainingDependencies.get(key)! > 0);
+		let phase = 0;
+		for (const [, node] of unresolved) phase = Math.max(phase, node.phase);
+		for (const [, node] of unresolved) orderedRoutines.push({ ...node, phase });
+	}
+	for (const node of orderedRoutines) {
+		const destination = node.phase === 2
+			? afterViewRoutineCreates
+			: node.phase === 1
+			? lateRoutineCreates
+			: earlyRoutineCreates;
+		destination.push(node.statement);
 	}
 
 	jsonStatements.push(...createSchemas);
@@ -2028,6 +2161,11 @@ export const applyPgSnapshotsDiff = async (
 	jsonStatements.push(...dropRoles);
 	jsonStatements.push(...createRoles);
 	jsonStatements.push(...jsonAlterRoles);
+
+	jsonStatements.push(...jsonDropTriggers);
+	jsonStatements.push(...jsonDropFunctions);
+	jsonStatements.push(...jsonDropProcedures);
+	jsonStatements.push(...earlyRoutineCreates);
 
 	jsonStatements.push(...createTables);
 
@@ -2057,6 +2195,7 @@ export const applyPgSnapshotsDiff = async (
 	jsonStatements.push(...jsonTableAlternations);
 	jsonStatements.push(...jsonAddedCompositePKs);
 	jsonStatements.push(...jsonAddColumnsStatemets);
+	jsonStatements.push(...lateRoutineCreates);
 
 	jsonStatements.push(...jsonCreateReferencesForCreatedTables);
 	jsonStatements.push(...jsonCreateIndexesForCreatedTables);
@@ -2073,6 +2212,7 @@ export const applyPgSnapshotsDiff = async (
 	jsonStatements.push(...jsonAlteredUniqueConstraints);
 
 	jsonStatements.push(...createViews);
+	jsonStatements.push(...afterViewRoutineCreates);
 
 	jsonStatements.push(...jsonRenamePoliciesStatements);
 	jsonStatements.push(...jsonDropPoliciesStatements);
@@ -2084,11 +2224,6 @@ export const applyPgSnapshotsDiff = async (
 	jsonStatements.push(...jsonCreateIndPoliciesStatements);
 	jsonStatements.push(...jsonAlterIndPoliciesStatements);
 
-	jsonStatements.push(...jsonDropTriggers);
-	jsonStatements.push(...jsonDropFunctions);
-	jsonStatements.push(...jsonDropProcedures);
-	jsonStatements.push(...jsonCreateFunctions);
-	jsonStatements.push(...jsonCreateProcedures);
 	jsonStatements.push(...jsonCreateTriggers);
 
 	jsonStatements.push(...dropEnums);

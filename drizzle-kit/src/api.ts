@@ -234,4 +234,4 @@ export { originUUID } from './global';
 
 export const introspectPostgres = pgFromDatabase;
 
-export type { Function, Trigger, Procedure } from './serializer/pgSchema';
+export type { Function, Procedure, Trigger } from './serializer/pgSchema';

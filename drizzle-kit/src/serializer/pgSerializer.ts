@@ -41,6 +41,7 @@ import type {
 	View,
 } from '../serializer/pgSchema';
 import { type DB, escapeSingleQuotes, isPgArrayType } from '../utils';
+import { introspectPgRoutines } from './pgRoutines';
 import { getColumnCasing, sqlToStr } from './utils';
 
 export const indexName = (tableName: string, columns: string[]) => {
@@ -1920,63 +1921,10 @@ WHERE
 
 	const whereFunctions = schemaFilters.map((t) => `n.nspname = '${t}'`).join(' or ');
 
-	const allFunctions = await db.query<{
-		schema: string;
-		name: string;
-		definition: string;
-	}>(
-		`SELECT
-			n.nspname as schema,
-			p.proname as name,
-			pg_get_functiondef(p.oid) as definition
-		FROM pg_proc p
-		JOIN pg_namespace n ON n.oid = p.pronamespace
-		WHERE p.prokind = 'f'
-			AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-			${whereFunctions === '' ? '' : ` AND (${whereFunctions})`}
-		ORDER BY schema, name;`,
+	const { functions: functionsToReturn, procedures: proceduresToReturn } = await introspectPgRoutines(
+		db,
+		schemaFilters,
 	);
-
-	const functionsToReturn: Record<string, { name: string; schema: string; definition: string }> = {};
-	for (const row of allFunctions) {
-		if (row.definition) {
-			const key = `${row.schema}.${row.name}`;
-			functionsToReturn[key] = {
-				name: row.name,
-				schema: row.schema,
-				definition: row.definition,
-			};
-		}
-	}
-
-	const allProcedures = await db.query<{
-		schema: string;
-		name: string;
-		definition: string;
-	}>(
-		`SELECT
-			n.nspname as schema,
-			p.proname as name,
-			pg_get_functiondef(p.oid) as definition
-		FROM pg_proc p
-		JOIN pg_namespace n ON n.oid = p.pronamespace
-		WHERE p.prokind = 'p'
-			AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-			${whereFunctions === '' ? '' : ` AND (${whereFunctions})`}
-		ORDER BY schema, name;`,
-	);
-
-	const proceduresToReturn: Record<string, { name: string; schema: string; definition: string }> = {};
-	for (const row of allProcedures) {
-		if (row.definition) {
-			const key = `${row.schema}.${row.name}`;
-			proceduresToReturn[key] = {
-				name: row.name,
-				schema: row.schema,
-				definition: row.definition,
-			};
-		}
-	}
 
 	const allTriggers = await db.query<{
 		schema: string;

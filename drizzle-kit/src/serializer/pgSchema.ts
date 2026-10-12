@@ -154,10 +154,27 @@ export const roleSchema = object({
 	inherit: boolean().optional(),
 }).strict();
 
+export const routineTypeSchema = object({
+	schema: string(),
+	name: string(),
+	isArray: boolean(),
+}).strict();
+
 export const functionSchema = object({
 	name: string(),
 	schema: string(),
 	definition: string(),
+	// Optional so existing snapshots remain readable. Destructive legacy diffs must
+	// be re-introspected because a name alone cannot identify an overload safely.
+	parameters: array(object({ name: string(), mode: string(), type: routineTypeSchema }).strict()).optional(),
+	returnType: routineTypeSchema.optional(),
+	returnsSet: boolean().optional(),
+	defaultCount: number().optional(),
+	relationDependencies: array(object({ schema: string(), name: string(), columns: array(string()) }).strict())
+		.optional(),
+	routineDependencies: array(
+		object({ schema: string(), name: string(), argumentTypes: array(routineTypeSchema) }).strict(),
+	).optional(),
 }).strict();
 
 export const triggerSchema = object({
@@ -167,11 +184,7 @@ export const triggerSchema = object({
 	definition: string(),
 }).strict();
 
-export const procedureSchema = object({
-	name: string(),
-	schema: string(),
-	definition: string(),
-}).strict();
+export const procedureSchema = functionSchema;
 
 export const sequenceSquashed = object({
 	name: string(),
@@ -537,6 +550,7 @@ export type Enum = TypeOf<typeof enumSchema>;
 export type Sequence = TypeOf<typeof sequenceSchema>;
 export type Role = TypeOf<typeof roleSchema>;
 export type Function = TypeOf<typeof functionSchema>;
+export type RoutineType = TypeOf<typeof routineTypeSchema>;
 export type Trigger = TypeOf<typeof triggerSchema>;
 export type Procedure = TypeOf<typeof procedureSchema>;
 export type Column = TypeOf<typeof column>;

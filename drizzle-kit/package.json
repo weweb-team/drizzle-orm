@@ -1,6 +1,6 @@
 {
 	"name": "@weweb/drizzle-kit",
-	"version": "0.32.0-weweb.3",
+	"version": "0.32.0-weweb.7",
 	"homepage": "https://orm.drizzle.team",
 	"keywords": [
 		"drizzle",
@@ -36,11 +36,11 @@
 		"migrate:old": "drizzle-kit generate:mysql",
 		"cli": "tsx ./src/cli/index.ts",
 		"test": "pnpm tsc && TEST_CONFIG_PATH_PREFIX=./tests/cli/ vitest",
+		"test:pg-functions": "vitest run tests/pg-functions.test.ts",
 		"build": "rm -rf ./dist && tsx build.ts && cp package.json dist/ && attw --pack dist",
 		"build:dev": "rm -rf ./dist && tsx build.dev.ts && tsc -p tsconfig.cli-types.json && chmod +x ./dist/index.cjs",
 		"pack": "cp package.json README.md dist/ && (cd dist && npm pack --pack-destination ..) && rm -f package.tgz && mv *.tgz package.tgz",
-		"tsc": "tsc -p tsconfig.build.json --noEmit",
-		"publish": "npm publish package.tgz"
+		"tsc": "tsc -p tsconfig.build.json --noEmit"
 	},
 	"dependencies": {
 		"@drizzle-team/brocli": "^0.10.2",
@@ -82,7 +82,7 @@
 		"commander": "^12.1.0",
 		"dockerode": "^4.0.6",
 		"dotenv": "^16.0.3",
-		"drizzle-kit": "0.25.0-b1faa33",
+		"drizzle-kit": "0.25.0",
 		"drizzle-orm": "workspace:./drizzle-orm/dist",
 		"env-paths": "^3.0.0",
 		"esbuild-node-externals": "^1.9.0",

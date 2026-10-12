@@ -5,6 +5,16 @@ This is a WeWeb fork of Drizzle Kit that exposes PostgreSQL-specific programmati
 **Original Repository**: [drizzle-team/drizzle-orm](https://github.com/drizzle-team/drizzle-orm)
 **Fork Repository**: [weweb-team/drizzle-orm](https://github.com/weweb-team/drizzle-orm)
 
+### Fork CI
+
+Pull requests and pushes to `main` check formatting, PostgreSQL schema diffs, Kit types,
+and package exports. Routine migration contracts run on PostgreSQL 16 and 18 with pgvector,
+against both the source API and the built CommonJS package. GitHub's repository-managed
+default CodeQL setup provides security scanning.
+
+The upstream multi-package publish and unpublish workflows are removed. Package releases
+are manual; this CI does not publish packages or modify npm tags.
+
 ### What's Different?
 
 This fork provides:
@@ -322,6 +332,27 @@ Introspects a PostgreSQL database and returns its schema.
 - `progressCallback`: Optional progress callback
 
 Returns: `Promise<PgSchemaInternal>`
+
+Function and procedure snapshots include parameter and return-type metadata. Their keys include
+input argument types, so overloads remain distinct. Extension-owned routines are excluded; user
+routines that depend on extensions remain included. Body-only changes use `CREATE OR REPLACE`
+to retain grants and dependent objects. Removed routines and incompatible parameter/return changes
+use signature-specific drops.
+
+Unchanged legacy user routines can be matched by their exact definitions. Re-introspect both
+snapshots created before `0.32.0-weweb.7` when an old routine has no unique exact match or the
+comparison contains several overloads of that name. This includes
+extension-owned routines now excluded from fresh snapshots, even if the live database is unchanged.
+Old name-only entries cannot safely identify an overload or prove extension ownership. Callers
+that introspect both databases before each migration do not need a stored-snapshot upgrade.
+
+Routines needed by table definitions remain available before table DDL. SQL string-body validation
+is deferred within a single statement when relations change, preserving the caller's setting.
+Routines requiring newly created or renamed table row types, columns, or views are created after
+those dependencies exist. PostgreSQL's catalog records dependencies for standard SQL bodies.
+Recursive standard SQL definitions are emitted for initial introspection too. Replaying those
+definitions into an empty database requires manually creating placeholder routines first, as
+PostgreSQL must resolve their parsed bodies at creation time.
 
 ### `generateMigration(prev, cur, decisions?)`
 
