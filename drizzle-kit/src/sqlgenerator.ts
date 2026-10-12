@@ -38,17 +38,20 @@ import {
 	JsonCreateCheckConstraint,
 	JsonCreateCompositePK,
 	JsonCreateEnumStatement,
+	JsonCreateFunctionStatement,
 	JsonCreateIndexStatement,
 	JsonCreateIndPolicyStatement,
 	JsonCreateMySqlViewStatement,
 	JsonCreatePgViewStatement,
 	JsonCreatePolicyStatement,
+	JsonCreateProcedureStatement,
 	JsonCreateReferenceStatement,
 	JsonCreateRoleStatement,
 	JsonCreateSchema,
 	JsonCreateSequenceStatement,
 	JsonCreateSqliteViewStatement,
 	JsonCreateTableStatement,
+	JsonCreateTriggerStatement,
 	JsonCreateUniqueConstraint,
 	JsonDeleteCheckConstraint,
 	JsonDeleteCompositePK,
@@ -57,12 +60,15 @@ import {
 	JsonDisableRLSStatement,
 	JsonDropColumnStatement,
 	JsonDropEnumStatement,
+	JsonDropFunctionStatement,
 	JsonDropIndexStatement,
 	JsonDropIndPolicyStatement,
 	JsonDropPolicyStatement,
+	JsonDropProcedureStatement,
 	JsonDropRoleStatement,
 	JsonDropSequenceStatement,
 	JsonDropTableStatement,
+	JsonDropTriggerStatement,
 	JsonDropValueFromEnumStatement,
 	JsonDropViewStatement,
 	JsonEnableRLSStatement,
@@ -83,15 +89,10 @@ import {
 	JsonSqliteAddColumnStatement,
 	JsonSqliteCreateTableStatement,
 	JsonStatement,
-	JsonCreateFunctionStatement,
-	JsonDropFunctionStatement,
-	JsonCreateTriggerStatement,
-	JsonDropTriggerStatement,
-	JsonCreateProcedureStatement,
-	JsonDropProcedureStatement,
 } from './jsonStatements';
 import { Dialect } from './schemaValidator';
 import { MySqlSquasher } from './serializer/mysqlSchema';
+import { formatRoutineArguments, quoteRoutineIdentifier } from './serializer/pgRoutines';
 import { PgSquasher, policy } from './serializer/pgSchema';
 import { SingleStoreSquasher } from './serializer/singlestoreSchema';
 import { SQLiteSchemaSquashed, SQLiteSquasher } from './serializer/sqliteSchema';
@@ -3972,7 +3973,9 @@ class PgDropFunctionConvertor extends Convertor {
 	}
 
 	convert(st: JsonDropFunctionStatement): string {
-		return `DROP FUNCTION IF EXISTS "${st.schema}"."${st.name}";`;
+		return `DROP FUNCTION IF EXISTS ${quoteRoutineIdentifier(st.schema)}.${quoteRoutineIdentifier(st.name)}(${
+			formatRoutineArguments(st.argumentTypes)
+		});`;
 	}
 }
 
@@ -4012,7 +4015,9 @@ class PgDropProcedureConvertor extends Convertor {
 	}
 
 	convert(st: JsonDropProcedureStatement): string {
-		return `DROP PROCEDURE IF EXISTS "${st.schema}"."${st.name}";`;
+		return `DROP PROCEDURE IF EXISTS ${quoteRoutineIdentifier(st.schema)}.${quoteRoutineIdentifier(st.name)}(${
+			formatRoutineArguments(st.argumentTypes)
+		});`;
 	}
 }
 

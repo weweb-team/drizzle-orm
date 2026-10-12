@@ -3,6 +3,7 @@ import { getNewTableName } from './cli/commands/sqlitePushUtils';
 import { warning } from './cli/views';
 import { CommonSquashedSchema } from './schemaValidator';
 import { MySqlKitInternals, MySqlSchema, MySqlSquasher, View as MySqlView } from './serializer/mysqlSchema';
+import { inputArgumentTypes } from './serializer/pgRoutines';
 import {
 	Index,
 	MatViewWithOption,
@@ -809,6 +810,7 @@ export interface JsonDropFunctionStatement {
 	type: 'drop_function';
 	name: string;
 	schema: string;
+	argumentTypes: import('./serializer/pgSchema').RoutineType[];
 }
 
 export interface JsonCreateTriggerStatement {
@@ -837,6 +839,7 @@ export interface JsonDropProcedureStatement {
 	type: 'drop_procedure';
 	name: string;
 	schema: string;
+	argumentTypes: import('./serializer/pgSchema').RoutineType[];
 }
 
 export type JsonAlterColumnStatement =
@@ -3612,12 +3615,13 @@ export const prepareCreateFunctionJson = (
 };
 
 export const prepareDropFunctionJson = (
-	func: { name: string; schema: string },
+	func: import('./serializer/pgSchema').Function,
 ): JsonDropFunctionStatement => {
 	return {
 		type: 'drop_function',
 		name: func.name,
 		schema: func.schema,
+		argumentTypes: inputArgumentTypes(func),
 	};
 };
 
@@ -3656,11 +3660,12 @@ export const prepareCreateProcedureJson = (
 };
 
 export const prepareDropProcedureJson = (
-	proc: { name: string; schema: string },
+	proc: import('./serializer/pgSchema').Procedure,
 ): JsonDropProcedureStatement => {
 	return {
 		type: 'drop_procedure',
 		name: proc.name,
 		schema: proc.schema,
+		argumentTypes: inputArgumentTypes(proc),
 	};
 };

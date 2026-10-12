@@ -13,6 +13,7 @@ import {
 	ZodTypeAny,
 } from 'zod';
 import { applyJsonDiff, diffColumns, diffIndPolicies, diffPolicies, diffSchemasOrTables } from './jsonDiffer';
+import { normalizeRoutineSnapshots, routineRequiresDrop } from './serializer/pgRoutines';
 import { fromJson } from './sqlgenerator';
 
 import {
@@ -69,13 +70,16 @@ import {
 	prepareAlterRoleJson,
 	prepareAlterSequenceJson,
 	prepareCreateEnumJson,
+	prepareCreateFunctionJson,
 	prepareCreateIndexesJson,
 	prepareCreateIndPolicyJsons,
 	prepareCreatePolicyJsons,
+	prepareCreateProcedureJson,
 	prepareCreateReferencesJson,
 	prepareCreateRoleJson,
 	prepareCreateSchemasJson,
 	prepareCreateSequenceJson,
+	prepareCreateTriggerJson,
 	prepareDeleteCheckConstraint,
 	prepareDeleteCompositePrimaryKeyMySql,
 	prepareDeleteCompositePrimaryKeyPg,
@@ -84,13 +88,16 @@ import {
 	prepareDeleteUniqueConstraintPg as prepareDeleteUniqueConstraint,
 	prepareDropEnumJson,
 	prepareDropEnumValues,
+	prepareDropFunctionJson,
 	prepareDropIndexesJson,
 	prepareDropIndPolicyJsons,
 	prepareDropPolicyJsons,
+	prepareDropProcedureJson,
 	prepareDropReferencesJson,
 	prepareDropRoleJson,
 	prepareDropSequenceJson,
 	prepareDropTableJson,
+	prepareDropTriggerJson,
 	prepareDropViewJson,
 	prepareLibSQLCreateReferencesJson,
 	prepareLibSQLDropReferencesJson,
@@ -121,12 +128,6 @@ import {
 	prepareSqliteAlterColumns,
 	prepareSQLiteCreateTable,
 	prepareSqliteCreateViewJson,
-	prepareCreateFunctionJson,
-	prepareDropFunctionJson,
-	prepareCreateTriggerJson,
-	prepareDropTriggerJson,
-	prepareCreateProcedureJson,
-	prepareDropProcedureJson,
 } from './jsonStatements';
 
 import { Named, NamedWithSchema } from './cli/commands/migrate';
@@ -1958,19 +1959,26 @@ export const applyPgSnapshotsDiff = async (
 	const jsonCreateProcedures: JsonStatement[] = [];
 	const jsonDropProcedures: JsonStatement[] = [];
 
-	const functionsDiff = diffSchemasOrTables(json1.functions ?? {}, json2.functions ?? {});
+	const { previous: previousFunctions, current: currentFunctions } = normalizeRoutineSnapshots(
+		json1.functions ?? {},
+		json2.functions ?? {},
+		renamedSchemas,
+		renamedEnums,
+		movedEnums,
+	);
+	const functionsDiff = diffSchemasOrTables(previousFunctions, currentFunctions);
 	for (const func of functionsDiff.added) {
 		jsonCreateFunctions.push(prepareCreateFunctionJson(func));
 	}
 	for (const func of functionsDiff.deleted) {
 		jsonDropFunctions.push(prepareDropFunctionJson(func));
 	}
-	for (const key of Object.keys(json1.functions ?? {})) {
-		if (json2.functions?.[key]) {
-			const prev = json1.functions![key];
-			const cur = json2.functions[key];
+	for (const key of Object.keys(previousFunctions)) {
+		if (currentFunctions[key]) {
+			const prev = previousFunctions[key];
+			const cur = currentFunctions[key];
 			if (prev.definition !== cur.definition) {
-				jsonDropFunctions.push(prepareDropFunctionJson(prev));
+				if (routineRequiresDrop(prev, cur)) jsonDropFunctions.push(prepareDropFunctionJson(prev));
 				jsonCreateFunctions.push(prepareCreateFunctionJson(cur));
 			}
 		}
@@ -1994,19 +2002,26 @@ export const applyPgSnapshotsDiff = async (
 		}
 	}
 
-	const proceduresDiff = diffSchemasOrTables(json1.procedures ?? {}, json2.procedures ?? {});
+	const { previous: previousProcedures, current: currentProcedures } = normalizeRoutineSnapshots(
+		json1.procedures ?? {},
+		json2.procedures ?? {},
+		renamedSchemas,
+		renamedEnums,
+		movedEnums,
+	);
+	const proceduresDiff = diffSchemasOrTables(previousProcedures, currentProcedures);
 	for (const proc of proceduresDiff.added) {
 		jsonCreateProcedures.push(prepareCreateProcedureJson(proc));
 	}
 	for (const proc of proceduresDiff.deleted) {
 		jsonDropProcedures.push(prepareDropProcedureJson(proc));
 	}
-	for (const key of Object.keys(json1.procedures ?? {})) {
-		if (json2.procedures?.[key]) {
-			const prev = json1.procedures![key];
-			const cur = json2.procedures[key];
+	for (const key of Object.keys(previousProcedures)) {
+		if (currentProcedures[key]) {
+			const prev = previousProcedures[key];
+			const cur = currentProcedures[key];
 			if (prev.definition !== cur.definition) {
-				jsonDropProcedures.push(prepareDropProcedureJson(prev));
+				if (routineRequiresDrop(prev, cur)) jsonDropProcedures.push(prepareDropProcedureJson(prev));
 				jsonCreateProcedures.push(prepareCreateProcedureJson(cur));
 			}
 		}
@@ -2028,6 +2043,12 @@ export const applyPgSnapshotsDiff = async (
 	jsonStatements.push(...dropRoles);
 	jsonStatements.push(...createRoles);
 	jsonStatements.push(...jsonAlterRoles);
+
+	jsonStatements.push(...jsonDropTriggers);
+	jsonStatements.push(...jsonDropFunctions);
+	jsonStatements.push(...jsonDropProcedures);
+	jsonStatements.push(...jsonCreateFunctions);
+	jsonStatements.push(...jsonCreateProcedures);
 
 	jsonStatements.push(...createTables);
 
@@ -2084,11 +2105,6 @@ export const applyPgSnapshotsDiff = async (
 	jsonStatements.push(...jsonCreateIndPoliciesStatements);
 	jsonStatements.push(...jsonAlterIndPoliciesStatements);
 
-	jsonStatements.push(...jsonDropTriggers);
-	jsonStatements.push(...jsonDropFunctions);
-	jsonStatements.push(...jsonDropProcedures);
-	jsonStatements.push(...jsonCreateFunctions);
-	jsonStatements.push(...jsonCreateProcedures);
 	jsonStatements.push(...jsonCreateTriggers);
 
 	jsonStatements.push(...dropEnums);

@@ -323,6 +323,16 @@ Introspects a PostgreSQL database and returns its schema.
 
 Returns: `Promise<PgSchemaInternal>`
 
+Function and procedure snapshots include parameter and return-type metadata. Their keys include
+input argument types, so overloads remain distinct. Extension-owned routines are excluded; user
+routines that depend on extensions remain included. Body-only changes use `CREATE OR REPLACE`
+to retain grants and dependent objects. Removed routines and incompatible parameter/return changes
+use signature-specific drops.
+
+Unchanged legacy routine snapshots remain readable. Re-introspect snapshots created before
+`0.32.0-weweb.7` before changing or removing routines: the old name-only entries cannot safely
+identify which overload to drop.
+
 ### `generateMigration(prev, cur, decisions?)`
 
 Generates SQL migration statements to transform `prev` schema into `cur` schema.
