@@ -15,6 +15,12 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 				if (overloadOrder && sql.includes("p.prokind = 'f'") && sql.includes('ORDER BY schema, name;')) {
 					sql = sql.replace('ORDER BY schema, name;', `ORDER BY schema, name, p.oid ${direction};`);
 				}
+				if (overloadOrder && sql.includes("p.prokind IN ('f', 'p')")) {
+					sql = sql.replace(
+						'ORDER BY n.nspname, p.proname, parameters',
+						`ORDER BY n.nspname, p.proname, p.oid ${direction}`,
+					);
+				}
 				return (await client.query(sql, params)).rows;
 			},
 		};
