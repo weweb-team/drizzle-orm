@@ -134,6 +134,7 @@ import { Named, NamedWithSchema } from './cli/commands/migrate';
 import { mapEntries, mapKeys, mapValues } from './global';
 import { MySqlSchema, MySqlSchemaSquashed, MySqlSquasher, ViewSquashed } from './serializer/mysqlSchema';
 import {
+	type Function as PgFunction,
 	mergedViewWithOption,
 	PgSchema,
 	PgSchemaSquashed,
@@ -1952,12 +1953,24 @@ export const applyPgSnapshotsDiff = async (
 		}
 	}
 
+	const droppedRelationTypes = new Set([
+		...jsonDropTables.map((table) => JSON.stringify([table.schema || 'public', table.tableName])),
+		...dropViews.map((view) => JSON.stringify([view.schema || 'public', view.name])),
+	]);
+	const usesDroppedRelationType = (routine: PgFunction) =>
+		[
+			...(routine.parameters ?? []).map((parameter) => parameter.type),
+			...(routine.returnType ? [routine.returnType] : []),
+		].some((type) => droppedRelationTypes.has(JSON.stringify([type.schema, type.name])));
+
 	const jsonCreateFunctions: JsonStatement[] = [];
 	const jsonDropFunctions: JsonStatement[] = [];
+	const jsonDropDeletedFunctions: JsonStatement[] = [];
 	const jsonCreateTriggers: JsonStatement[] = [];
 	const jsonDropTriggers: JsonStatement[] = [];
 	const jsonCreateProcedures: JsonStatement[] = [];
 	const jsonDropProcedures: JsonStatement[] = [];
+	const jsonDropDeletedProcedures: JsonStatement[] = [];
 
 	const { previous: previousFunctions, current: currentFunctions, drops: functionDrops } = normalizeRoutineSnapshots(
 		json1.functions ?? {},
@@ -1973,7 +1986,10 @@ export const applyPgSnapshotsDiff = async (
 		jsonCreateFunctions.push(prepareCreateFunctionJson(func));
 	}
 	for (const func of functionsDiff.deleted) {
-		jsonDropFunctions.push(prepareDropFunctionJson(functionDrops[routineKey(func)] ?? func));
+		const early = usesDroppedRelationType(func);
+		(early ? jsonDropFunctions : jsonDropDeletedFunctions).push(
+			prepareDropFunctionJson(early ? functionDrops[routineKey(func)] ?? func : func),
+		);
 	}
 	for (const key of Object.keys(previousFunctions)) {
 		if (currentFunctions[key]) {
@@ -2018,7 +2034,10 @@ export const applyPgSnapshotsDiff = async (
 		jsonCreateProcedures.push(prepareCreateProcedureJson(proc));
 	}
 	for (const proc of proceduresDiff.deleted) {
-		jsonDropProcedures.push(prepareDropProcedureJson(procedureDrops[routineKey(proc)] ?? proc));
+		const early = usesDroppedRelationType(proc);
+		(early ? jsonDropProcedures : jsonDropDeletedProcedures).push(
+			prepareDropProcedureJson(early ? procedureDrops[routineKey(proc)] ?? proc : proc),
+		);
 	}
 	for (const key of Object.keys(previousProcedures)) {
 		if (currentProcedures[key]) {
@@ -2096,7 +2115,14 @@ export const applyPgSnapshotsDiff = async (
 	const availableRoutines = new Set(
 		[...Object.values(functionDrops), ...Object.values(procedureDrops)].map(routineKey),
 	);
-	for (const statement of [...jsonDropFunctions, ...jsonDropProcedures]) {
+	for (
+		const statement of [
+			...jsonDropFunctions,
+			...jsonDropDeletedFunctions,
+			...jsonDropProcedures,
+			...jsonDropDeletedProcedures,
+		]
+	) {
 		if (statement.type !== 'drop_function' && statement.type !== 'drop_procedure') continue;
 		availableRoutines.delete(JSON.stringify([statement.schema, statement.name, statement.argumentTypes]));
 	}
@@ -2223,6 +2249,10 @@ export const applyPgSnapshotsDiff = async (
 	jsonStatements.push(...jsonDropIndPoliciesStatements);
 	jsonStatements.push(...jsonCreateIndPoliciesStatements);
 	jsonStatements.push(...jsonAlterIndPoliciesStatements);
+
+	// Remove dependents before deleting routines. Recreation and removed row types require early drops.
+	jsonStatements.push(...jsonDropDeletedFunctions);
+	jsonStatements.push(...jsonDropDeletedProcedures);
 
 	jsonStatements.push(...jsonCreateTriggers);
 

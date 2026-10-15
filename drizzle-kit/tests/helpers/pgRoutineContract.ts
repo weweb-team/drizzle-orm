@@ -162,6 +162,61 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 			expect(await generate()).toEqual([]);
 		});
 
+		it.each(['view', 'policy', 'table', 'column'])(
+			'drops a removed %s dependency before its function',
+			async (dependency) => {
+				for (const pool of [source, target]) {
+					await pool.query(
+						`CREATE FUNCTION public.can_read(value integer) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT value > 0';
+					CREATE TABLE public.items(id integer);`,
+					);
+					if (dependency === 'view') {
+						await pool.query(
+							'CREATE VIEW public.allowed_items AS SELECT * FROM public.items WHERE public.can_read(id)',
+						);
+					}
+					if (dependency === 'policy' || dependency === 'table') {
+						await pool.query(
+							'ALTER TABLE public.items ENABLE ROW LEVEL SECURITY; CREATE POLICY allowed_items ON public.items USING (public.can_read(id))',
+						);
+					}
+					if (dependency === 'column') {
+						await pool.query(
+							'ALTER TABLE public.items ADD COLUMN allowed boolean GENERATED ALWAYS AS (public.can_read(id)) STORED',
+						);
+					}
+				}
+				if (dependency === 'view') await source.query('DROP VIEW public.allowed_items');
+				if (dependency === 'policy') await source.query('DROP POLICY allowed_items ON public.items');
+				if (dependency === 'table') await source.query('DROP TABLE public.items');
+				if (dependency === 'column') await source.query('ALTER TABLE public.items DROP COLUMN allowed');
+				await source.query('DROP FUNCTION public.can_read(integer)');
+
+				const statements = await generate();
+				await apply(statements);
+				expect((await target.query("SELECT to_regprocedure('public.can_read(integer)') AS routine")).rows).toEqual([{
+					routine: null,
+				}]);
+				expect(await generate()).toEqual([]);
+			},
+		);
+
+		it.each(['function', 'procedure'])('drops a removed %s before its argument row type', async (kind) => {
+			for (const pool of [source, target]) {
+				await pool.query('CREATE TABLE public.items(id integer)');
+				await pool.query(
+					kind === 'function'
+						? `CREATE FUNCTION public.watch(public.items) RETURNS integer LANGUAGE sql AS 'SELECT $1.id'`
+						: `CREATE PROCEDURE public.watch(public.items) LANGUAGE plpgsql AS $$ BEGIN NULL; END $$`,
+				);
+			}
+			await source.query(`DROP ${kind.toUpperCase()} public.watch(public.items); DROP TABLE public.items`);
+			await apply(await generate());
+			expect((await target.query("SELECT count(*)::integer AS remaining FROM pg_proc WHERE proname = 'watch'")).rows)
+				.toEqual([{ remaining: 0 }]);
+			expect(await generate()).toEqual([]);
+		});
+
 		it('creates every new overload', async () => {
 			await source.query(`CREATE FUNCTION public.watch(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1';
             CREATE FUNCTION public.watch(text) RETURNS text LANGUAGE sql AS 'SELECT $1'`);
@@ -817,7 +872,7 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 			expect(await generate()).toEqual([]);
 		});
 
-		it('uses the original table type name when removing a routine during a rename', async () => {
+		it('removes a routine using its renamed table argument after resolving dependencies', async () => {
 			for (const client of [source, target]) {
 				await client.query(`CREATE TABLE public.items(id integer);
 				CREATE FUNCTION public.watch(public.items) RETURNS integer LANGUAGE sql AS 'SELECT $1.id'`);
