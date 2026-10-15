@@ -693,6 +693,7 @@ export interface JsonRenameSchema {
 
 export type JsonCreatePgViewStatement = {
 	type: 'create_view';
+	replace?: boolean;
 } & Omit<PgView, 'columns' | 'isExisting'>;
 
 export type JsonCreateMySqlViewStatement = {

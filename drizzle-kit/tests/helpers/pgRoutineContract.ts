@@ -27,7 +27,15 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 				const rows = (await client.query(sql, params)).rows;
 				if (jsonMetadataAsText) {
 					for (const row of rows) {
-						for (const key of ['parameters', 'returnType', 'relationDependencies', 'routineDependencies']) {
+						for (
+							const key of [
+								'parameters',
+								'returnType',
+								'relationDependencies',
+								'routineDependencies',
+								'dependentObjects',
+							]
+						) {
 							if (row[key] !== undefined) row[key] = JSON.stringify(row[key]);
 						}
 					}
@@ -139,6 +147,250 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 			expect(await generate()).toEqual([]);
 		});
 
+		it('updates a news trigger without touching pgvector, indexes, constraints or existing data', async () => {
+			for (const pool of [source, target]) {
+				await pool.query(`CREATE EXTENSION vector;
+				CREATE TABLE public.news(item_id text PRIMARY KEY, origins text[] NOT NULL DEFAULT '{}', embedding vector(3));
+				CREATE INDEX news_embedding ON public.news USING hnsw(embedding vector_l2_ops);
+				CREATE FUNCTION public.rasd_watch_on_news() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$;
+				CREATE TRIGGER news_watch BEFORE INSERT ON public.news FOR EACH ROW EXECUTE FUNCTION public.rasd_watch_on_news();
+				INSERT INTO public.news VALUES ('existing', '{feed}', '[1,2,3]')`);
+			}
+			const extensionState = async () =>
+				(await target.query(`SELECT p.oid, p.prosrc FROM pg_proc p
+			JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e'
+			JOIN pg_extension e ON e.oid = d.refobjid AND d.refclassid = 'pg_extension'::regclass
+			WHERE e.extname = 'vector' ORDER BY p.oid`)).rows;
+			const before = await extensionState();
+			const objects = (await target.query(`SELECT oid, relname FROM pg_class
+			WHERE relname IN ('news_pkey', 'news_embedding') ORDER BY relname`)).rows;
+			await source.query(`CREATE OR REPLACE FUNCTION public.rasd_watch_on_news() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN
+				IF EXISTS (SELECT 1 FROM unnest(COALESCE(NEW.origins, '{}'::text[])) AS o(v) WHERE o.v LIKE 'import:%') THEN RETURN NEW; END IF;
+				NEW.origins := array_append(NEW.origins, 'processed');
+				RETURN NEW;
+			END$$`);
+			overloadOrder = 'different';
+			const statements = await generate();
+			expect(statements).toHaveLength(1);
+			expect(statements[0]).toMatch(/^CREATE OR REPLACE FUNCTION public.rasd_watch_on_news/);
+			await apply(statements, true);
+			await apply(statements);
+			expect(await extensionState()).toEqual(before);
+			expect(
+				(await target.query(`SELECT oid, relname FROM pg_class
+			WHERE relname IN ('news_pkey', 'news_embedding') ORDER BY relname`)).rows,
+			).toEqual(objects);
+			expect((await target.query(`SELECT item_id, origins, embedding::text FROM public.news`)).rows).toEqual([
+				{ item_id: 'existing', origins: ['feed'], embedding: '[1,2,3]' },
+			]);
+			expect(
+				(await target.query(`INSERT INTO public.news VALUES ('fresh', '{feed}', '[2,3,4]') RETURNING origins`)).rows,
+			)
+				.toEqual([{ origins: ['feed', 'processed'] }]);
+			expect(
+				(await target.query(`INSERT INTO public.news VALUES ('archive', '{import:news}', '[2,3,4]') RETURNING origins`))
+					.rows,
+			)
+				.toEqual([{ origins: ['import:news'] }]);
+			expect((await target.query(`SELECT l1_distance('[1,2,3]'::vector, '[2,3,4]'::vector) AS distance`)).rows)
+				.toEqual([{ distance: 3 }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it('drops a removed dependent view before its function and argument row type', async () => {
+			for (const pool of [source, target]) {
+				await pool.query(`CREATE TABLE public.items(id integer);
+				CREATE FUNCTION public.watch(public.items) RETURNS integer LANGUAGE sql AS 'SELECT $1.id';
+				CREATE VIEW public.watched AS SELECT public.watch(ROW(1)::public.items) AS result`);
+			}
+			await source.query('DROP VIEW public.watched; DROP FUNCTION public.watch(public.items); DROP TABLE public.items');
+			await apply(await generate());
+			expect(await generate()).toEqual([]);
+		});
+
+		it('drops removed standard SQL callers before the routines they call', async () => {
+			for (const pool of [source, target]) {
+				await pool.query(`CREATE FUNCTION public.a_callee() RETURNS integer LANGUAGE sql RETURN 1;
+				CREATE FUNCTION public.z_caller() RETURNS integer LANGUAGE sql RETURN public.a_callee()`);
+			}
+			await source.query('DROP FUNCTION public.z_caller(); DROP FUNCTION public.a_callee()');
+			await apply(await generate());
+			expect(await generate()).toEqual([]);
+		});
+
+		it('rejects a required callee drop when a replaced caller still depends on it', async () => {
+			for (const pool of [source, target]) {
+				await pool.query(`CREATE FUNCTION public.callee() RETURNS integer LANGUAGE sql RETURN 1;
+				CREATE FUNCTION public.caller() RETURNS integer LANGUAGE sql RETURN public.callee()`);
+			}
+			await source.query(`DROP FUNCTION public.caller(); DROP FUNCTION public.callee();
+			CREATE FUNCTION public.callee() RETURNS bigint LANGUAGE sql RETURN 2::bigint;
+			CREATE FUNCTION public.caller() RETURNS integer LANGUAGE sql RETURN public.callee()::integer`);
+			await expect(generate()).rejects.toThrow(/Cannot safely.*(callee|caller|dependenc)/);
+			expect((await target.query('SELECT public.caller() AS result')).rows).toEqual([{ result: 1 }]);
+		});
+
+		it('creates a new caller only after its callee has been dropped and recreated', async () => {
+			for (const pool of [source, target]) {
+				await pool.query(`CREATE FUNCTION public.callee() RETURNS integer LANGUAGE sql RETURN 1;
+				CREATE VIEW public.old_view AS SELECT public.callee() AS result`);
+			}
+			await source.query(`DROP VIEW public.old_view; DROP FUNCTION public.callee();
+			CREATE FUNCTION public.callee() RETURNS bigint LANGUAGE sql RETURN 2::bigint;
+			CREATE FUNCTION public.caller() RETURNS bigint LANGUAGE sql RETURN public.callee()`);
+			await apply(await generate());
+			expect((await target.query('SELECT public.caller() AS result')).rows).toEqual([{ result: '2' }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it('rejects incompatible view recreation with a surviving row-type routine without touching data', async () => {
+			for (const pool of [source, target]) {
+				await pool.query(`CREATE VIEW public.items AS SELECT 1 AS id;
+				CREATE FUNCTION public.watch(public.items) RETURNS integer LANGUAGE sql AS 'SELECT $1.id'`);
+			}
+			await source.query(`DROP FUNCTION public.watch(public.items); DROP VIEW public.items;
+			CREATE VIEW public.items AS SELECT 2::bigint AS id;
+			CREATE FUNCTION public.watch(public.items) RETURNS integer LANGUAGE sql AS 'SELECT $1.id::integer'`);
+			await expect(generate()).rejects.toThrow(/Cannot safely recreate view public.items/);
+			expect((await target.query('SELECT public.watch(items) AS result FROM public.items')).rows).toEqual([{
+				result: 1,
+			}]);
+		});
+
+		it.each(['function', 'procedure'])('replaces a %s with the other routine kind', async (kind) => {
+			const other = kind === 'function' ? 'procedure' : 'function';
+			const create = (routineKind: string) =>
+				routineKind === 'function'
+					? `CREATE FUNCTION public.watch(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1'`
+					: `CREATE PROCEDURE public.watch(integer) LANGUAGE plpgsql AS 'BEGIN NULL; END'`;
+			for (const pool of [source, target]) await pool.query(create(kind));
+			await source.query(`DROP ${kind} public.watch(integer); ${create(other)}`);
+			await apply(await generate());
+			expect((await target.query(`SELECT prokind FROM pg_proc WHERE oid = 'public.watch(integer)'::regprocedure`)).rows)
+				.toEqual([{ prokind: other === 'function' ? 'f' : 'p' }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it('recreates a function after removing its dependent view', async () => {
+			for (const pool of [source, target]) {
+				await pool.query(
+					`CREATE FUNCTION public.watch(value integer DEFAULT 1) RETURNS integer LANGUAGE sql AS 'SELECT value';
+				CREATE VIEW public.watched AS SELECT public.watch() AS result`,
+				);
+			}
+			await source.query(`DROP VIEW public.watched; DROP FUNCTION public.watch(integer);
+			CREATE FUNCTION public.watch(value integer) RETURNS integer LANGUAGE sql AS 'SELECT value'`);
+			await apply(await generate());
+			expect((await target.query('SELECT public.watch(2) AS result')).rows).toEqual([{ result: 2 }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it('recreates a function between dropping and recreating its changed dependent view', async () => {
+			for (const pool of [source, target]) {
+				await pool.query(
+					`CREATE FUNCTION public.watch(value integer DEFAULT 1) RETURNS integer LANGUAGE sql AS 'SELECT value';
+				CREATE VIEW public.watched AS SELECT public.watch() AS result`,
+				);
+			}
+			await source.query(`DROP VIEW public.watched; DROP FUNCTION public.watch(integer);
+			CREATE FUNCTION public.watch(value integer) RETURNS integer LANGUAGE sql AS 'SELECT value';
+			CREATE VIEW public.watched AS SELECT public.watch(2) AS result`);
+			await apply(await generate());
+			expect((await target.query('SELECT * FROM public.watched')).rows).toEqual([{ result: 2 }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it.each(['policy', 'default', 'view'])('removes a function after altering its dependent %s', async (kind) => {
+			for (const pool of [source, target]) {
+				await pool.query(
+					`CREATE FUNCTION public.can_read(value integer) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT value > 0';
+				CREATE TABLE public.items(id integer)`,
+				);
+				if (kind === 'policy') {
+					await pool.query(
+						'ALTER TABLE public.items ENABLE ROW LEVEL SECURITY; CREATE POLICY allowed_items ON public.items USING (public.can_read(id))',
+					);
+				}
+				if (kind === 'default') {
+					await pool.query('ALTER TABLE public.items ADD COLUMN allowed boolean DEFAULT public.can_read(1)');
+				}
+				if (kind === 'view') {
+					await pool.query('CREATE VIEW public.allowed_items AS SELECT * FROM public.items WHERE public.can_read(id)');
+				}
+			}
+			if (kind === 'policy') await source.query('ALTER POLICY allowed_items ON public.items USING (true)');
+			if (kind === 'default') await source.query('ALTER TABLE public.items ALTER COLUMN allowed SET DEFAULT false');
+			if (kind === 'view') {
+				await source.query('CREATE OR REPLACE VIEW public.allowed_items AS SELECT * FROM public.items WHERE true');
+			}
+			await source.query('DROP FUNCTION public.can_read(integer)');
+			await apply(await generate());
+			expect(await generate()).toEqual([]);
+		});
+
+		it('preserves boolean default expressions alongside true and false literals', async () => {
+			await source.query(
+				`CREATE FUNCTION public.can_read(integer) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT $1 > 0';
+			CREATE TABLE public.items(allowed boolean DEFAULT public.can_read(1), enabled boolean DEFAULT true, disabled boolean DEFAULT false)`,
+			);
+			await apply(await generate());
+			expect((await target.query('INSERT INTO public.items DEFAULT VALUES RETURNING *')).rows)
+				.toEqual([{ allowed: true, enabled: true, disabled: false }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it.each(['view', 'materialized view'])(
+			'drops a dependent view before a removed function using a %s row type',
+			async (kind) => {
+				for (const pool of [source, target]) {
+					await pool.query(`CREATE ${kind} public.items AS SELECT 1 AS id;
+				CREATE FUNCTION public.watch(public.items) RETURNS integer LANGUAGE sql AS 'SELECT $1.id';
+				CREATE VIEW public.watched AS SELECT public.watch(ROW(1)::public.items) AS result`);
+				}
+				await source.query(
+					`DROP VIEW public.watched; DROP FUNCTION public.watch(public.items); DROP ${kind} public.items`,
+				);
+				await apply(await generate());
+				expect(await generate()).toEqual([]);
+			},
+		);
+
+		it('keeps row-type function and view grants when replacing a compatible view definition', async () => {
+			for (const pool of [source, target]) {
+				await pool.query(`CREATE VIEW public.items AS SELECT 1 AS id;
+				CREATE FUNCTION public.watch(public.items) RETURNS integer LANGUAGE sql AS 'SELECT $1.id';
+				CREATE VIEW public.watched AS SELECT public.watch(items) AS result FROM public.items`);
+			}
+			await target.query(`REVOKE ALL ON public.items FROM PUBLIC; GRANT SELECT ON public.items TO pg_read_all_data;
+			REVOKE EXECUTE ON FUNCTION public.watch(public.items) FROM PUBLIC;
+			GRANT EXECUTE ON FUNCTION public.watch(public.items) TO pg_read_all_data`);
+			const before = (await target.query(`SELECT c.oid, c.relacl, p.oid AS routine_oid, p.proacl FROM pg_class c
+			CROSS JOIN pg_proc p WHERE c.oid='public.items'::regclass AND p.oid='public.watch(public.items)'::regprocedure`))
+				.rows;
+			await source.query('CREATE OR REPLACE VIEW public.items AS SELECT 2 AS id');
+			const statements = await generate();
+			expect(statements.some((statement) => /^DROP (FUNCTION|VIEW)/.test(statement))).toBe(false);
+			await apply(statements);
+			expect((await target.query('SELECT * FROM public.watched')).rows).toEqual([{ result: 2 }]);
+			expect(
+				(await target.query(`SELECT c.oid, c.relacl, p.oid AS routine_oid, p.proacl FROM pg_class c
+			CROSS JOIN pg_proc p WHERE c.oid='public.items'::regclass AND p.oid='public.watch(public.items)'::regprocedure`))
+					.rows,
+			).toEqual(before);
+			expect(await generate()).toEqual([]);
+		});
+
+		it('drops removed SQL-standard routines before relations read by their bodies', async () => {
+			for (const pool of [source, target]) {
+				await pool.query(`CREATE TABLE public.items(id integer);
+				CREATE FUNCTION public.watch() RETURNS bigint LANGUAGE sql RETURN (SELECT count(*) FROM public.items)`);
+			}
+			await source.query('DROP FUNCTION public.watch(); DROP TABLE public.items');
+			await apply(await generate());
+			expect(await generate()).toEqual([]);
+		});
+
 		it('drops only the removed overload', async () => {
 			for (const pool of [source, target]) {
 				await pool.query(`CREATE FUNCTION public.watch(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1';
@@ -159,6 +411,73 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 			const statements = await generate();
 			expect(statements).toHaveLength(2);
 			await apply(statements);
+			expect(await generate()).toEqual([]);
+		});
+
+		it.each(['view', 'policy', 'table', 'column', 'index', 'constraint', 'default'])(
+			'drops a removed %s dependency before its function',
+			async (dependency) => {
+				for (const pool of [source, target]) {
+					await pool.query(
+						`CREATE FUNCTION public.can_read(value integer) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT value > 0';
+					CREATE TABLE public.items(id integer);`,
+					);
+					if (dependency === 'view') {
+						await pool.query(
+							'CREATE VIEW public.allowed_items AS SELECT * FROM public.items WHERE public.can_read(id)',
+						);
+					}
+					if (dependency === 'policy' || dependency === 'table') {
+						await pool.query(
+							'ALTER TABLE public.items ENABLE ROW LEVEL SECURITY; CREATE POLICY allowed_items ON public.items USING (public.can_read(id))',
+						);
+					}
+					if (dependency === 'column') {
+						await pool.query(
+							'ALTER TABLE public.items ADD COLUMN allowed boolean GENERATED ALWAYS AS (public.can_read(id)) STORED',
+						);
+					}
+					if (dependency === 'index') {
+						await pool.query('CREATE INDEX allowed_items ON public.items(public.can_read(id))');
+					}
+					if (dependency === 'constraint') {
+						await pool.query('ALTER TABLE public.items ADD CONSTRAINT allowed_items CHECK (public.can_read(id))');
+					}
+					if (dependency === 'default') {
+						await pool.query('ALTER TABLE public.items ADD COLUMN allowed boolean DEFAULT public.can_read(1)');
+					}
+				}
+				if (dependency === 'view') await source.query('DROP VIEW public.allowed_items');
+				if (dependency === 'policy') await source.query('DROP POLICY allowed_items ON public.items');
+				if (dependency === 'table') await source.query('DROP TABLE public.items');
+				if (dependency === 'column') await source.query('ALTER TABLE public.items DROP COLUMN allowed');
+				if (dependency === 'index') await source.query('DROP INDEX public.allowed_items');
+				if (dependency === 'constraint') await source.query('ALTER TABLE public.items DROP CONSTRAINT allowed_items');
+				if (dependency === 'default') await source.query('ALTER TABLE public.items ALTER COLUMN allowed DROP DEFAULT');
+				await source.query('DROP FUNCTION public.can_read(integer)');
+
+				const statements = await generate();
+				await apply(statements);
+				expect((await target.query("SELECT to_regprocedure('public.can_read(integer)') AS routine")).rows).toEqual([{
+					routine: null,
+				}]);
+				expect(await generate()).toEqual([]);
+			},
+		);
+
+		it.each(['function', 'procedure'])('drops a removed %s before its argument row type', async (kind) => {
+			for (const pool of [source, target]) {
+				await pool.query('CREATE TABLE public.items(id integer)');
+				await pool.query(
+					kind === 'function'
+						? `CREATE FUNCTION public.watch(public.items) RETURNS integer LANGUAGE sql AS 'SELECT $1.id'`
+						: `CREATE PROCEDURE public.watch(public.items) LANGUAGE plpgsql AS $$ BEGIN NULL; END $$`,
+				);
+			}
+			await source.query(`DROP ${kind.toUpperCase()} public.watch(public.items); DROP TABLE public.items`);
+			await apply(await generate());
+			expect((await target.query("SELECT count(*)::integer AS remaining FROM pg_proc WHERE proname = 'watch'")).rows)
+				.toEqual([{ remaining: 0 }]);
 			expect(await generate()).toEqual([]);
 		});
 
@@ -684,20 +1003,29 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 			expect(await generate()).toEqual([]);
 		});
 
-		it('replaces compatible mutually dependent routines already present in the target', async () => {
-			for (const client of [source, target]) {
-				await client.query(`CREATE FUNCTION public.a_caller(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1';
+		it.each([false, true])(
+			'replaces compatible mutually dependent routines already present in the target (unrelated drop: %s)',
+			async (unrelatedDrop) => {
+				for (const client of [source, target]) {
+					await client.query(`CREATE FUNCTION public.a_caller(integer) RETURNS integer LANGUAGE sql AS 'SELECT $1';
 				CREATE FUNCTION public.z_callee(integer) RETURNS integer LANGUAGE sql RETURN public.a_caller($1);
 				CREATE OR REPLACE FUNCTION public.a_caller(integer) RETURNS integer LANGUAGE sql RETURN public.z_callee($1)`);
-			}
-			await source.query(
-				`CREATE OR REPLACE FUNCTION public.a_caller(integer) RETURNS integer LANGUAGE sql RETURN CASE WHEN $1 = 0 THEN 0 ELSE public.z_callee($1 - 1) END;
+				}
+				if (unrelatedDrop) {
+					for (const pool of [source, target]) {
+						await pool.query("CREATE FUNCTION public.obsolete() RETURNS integer LANGUAGE sql AS 'SELECT 1'");
+					}
+					await source.query('DROP FUNCTION public.obsolete()');
+				}
+				await source.query(
+					`CREATE OR REPLACE FUNCTION public.a_caller(integer) RETURNS integer LANGUAGE sql RETURN CASE WHEN $1 = 0 THEN 0 ELSE public.z_callee($1 - 1) END;
 				CREATE OR REPLACE FUNCTION public.z_callee(integer) RETURNS integer LANGUAGE sql RETURN CASE WHEN $1 = 0 THEN 0 ELSE public.a_caller($1 - 1) END`,
-			);
-			await apply(await generate());
-			expect((await target.query('SELECT public.a_caller(2) AS result')).rows).toEqual([{ result: 0 }]);
-			expect(await generate()).toEqual([]);
-		});
+				);
+				await apply(await generate());
+				expect((await target.query('SELECT public.a_caller(2) AS result')).rows).toEqual([{ result: 0 }]);
+				expect(await generate()).toEqual([]);
+			},
+		);
 
 		it.each(['atomic', 'rowtype'])('creates a %s routine after recreating a changed view', async (kind) => {
 			for (const client of [source, target]) {
@@ -817,7 +1145,7 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 			expect(await generate()).toEqual([]);
 		});
 
-		it('uses the original table type name when removing a routine during a rename', async () => {
+		it('removes a routine using its renamed table argument after resolving dependencies', async () => {
 			for (const client of [source, target]) {
 				await client.query(`CREATE TABLE public.items(id integer);
 				CREATE FUNCTION public.watch(public.items) RETURNS integer LANGUAGE sql AS 'SELECT $1.id'`);
@@ -836,6 +1164,32 @@ export function runPgRoutineContract(api: typeof import('../../src/api')) {
 			);
 			expect((await target.query("SELECT count(*)::integer AS remaining FROM pg_proc WHERE proname = 'watch'")).rows)
 				.toEqual([{ remaining: 0 }]);
+			expect(await generate()).toEqual([]);
+		});
+
+		it.each(['rename', 'move'])('removes a function after its dependent index and a table %s', async (operation) => {
+			for (const pool of [source, target]) {
+				await pool.query(`CREATE SCHEMA auth; CREATE TABLE public.items(id integer);
+				CREATE FUNCTION public.positive(integer) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT $1 > 0';
+				CREATE INDEX items_positive ON public.items(public.positive(id))`);
+			}
+			await source.query('DROP INDEX public.items_positive; DROP FUNCTION public.positive(integer)');
+			await source.query(
+				operation === 'rename'
+					? 'ALTER TABLE public.items RENAME TO entries'
+					: 'ALTER TABLE public.items SET SCHEMA auth',
+			);
+			const conflict = await conflictFor('tables');
+			await apply(
+				await generate({
+					tables: {
+						created: [],
+						deleted: [],
+						renamed: operation === 'rename' ? [{ from: conflict.deleted[0], to: conflict.created[0] }] : [],
+						moved: operation === 'move' ? [{ name: 'items', schemaFrom: 'public', schemaTo: 'auth' }] : [],
+					},
+				}),
+			);
 			expect(await generate()).toEqual([]);
 		});
 

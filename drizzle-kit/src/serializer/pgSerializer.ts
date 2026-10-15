@@ -2069,7 +2069,11 @@ const defaultForColumn = (column: any, internals: PgKitInternals, tableName: str
 		const jsonWithoutSpaces = JSON.stringify(JSON.parse(columnDefaultAsString.slice(1, -1)));
 		return `'${jsonWithoutSpaces}'::${column.data_type}`;
 	} else if (column.data_type === 'boolean') {
-		return column.column_default === 'true';
+		if (columnDefaultAsString === 'true' || columnDefaultAsString === 'false') return columnDefaultAsString === 'true';
+		const tableInternals = internals!.tables![tableName] ??= { columns: {} };
+		const columnInternals = tableInternals.columns[columnName] ??= {};
+		columnInternals.isDefaultAnExpression = true;
+		return columnDefaultAsString;
 	} else if (columnDefaultAsString === 'NULL') {
 		return `NULL`;
 	} else if (columnDefaultAsString.startsWith("'") && columnDefaultAsString.endsWith("'")) {

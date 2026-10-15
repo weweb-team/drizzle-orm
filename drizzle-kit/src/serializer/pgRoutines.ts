@@ -46,6 +46,41 @@ export async function introspectPgRoutines(db: DB, schemaFilters: string[]) {
 		pg_catalog.pg_get_functiondef(p.oid) AS definition,
 		p.proretset AS "returnsSet",
 		p.pronargdefaults AS "defaultCount",
+		COALESCE((SELECT pg_catalog.jsonb_agg(DISTINCT objects.object)
+			FROM pg_catalog.pg_depend incoming
+			CROSS JOIN LATERAL (
+				SELECT pg_catalog.jsonb_build_object('kind', 'view', 'schema', ns.nspname, 'name', rel.relname) AS object
+				FROM pg_catalog.pg_rewrite rewrite JOIN pg_catalog.pg_class rel ON rel.oid = rewrite.ev_class
+				JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+				WHERE incoming.classid = 'pg_catalog.pg_rewrite'::regclass AND rewrite.oid = incoming.objid
+				UNION ALL
+				SELECT pg_catalog.jsonb_build_object('kind', 'index', 'schema', ns.nspname, 'name', rel.relname, 'tableName', tbl.relname)
+				FROM pg_catalog.pg_class rel JOIN pg_catalog.pg_index idx ON idx.indexrelid = rel.oid
+				JOIN pg_catalog.pg_class tbl ON tbl.oid = idx.indrelid JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+				WHERE incoming.classid = 'pg_catalog.pg_class'::regclass AND rel.oid = incoming.objid
+				UNION ALL
+				SELECT pg_catalog.jsonb_build_object('kind', 'constraint', 'schema', ns.nspname, 'name', con.conname, 'tableName', tbl.relname)
+				FROM pg_catalog.pg_constraint con JOIN pg_catalog.pg_class tbl ON tbl.oid = con.conrelid
+				JOIN pg_catalog.pg_namespace ns ON ns.oid = tbl.relnamespace
+				WHERE incoming.classid = 'pg_catalog.pg_constraint'::regclass AND con.oid = incoming.objid
+				UNION ALL
+				SELECT pg_catalog.jsonb_build_object('kind', 'policy', 'schema', ns.nspname, 'name', pol.polname, 'tableName', tbl.relname)
+				FROM pg_catalog.pg_policy pol JOIN pg_catalog.pg_class tbl ON tbl.oid = pol.polrelid
+				JOIN pg_catalog.pg_namespace ns ON ns.oid = tbl.relnamespace
+				WHERE incoming.classid = 'pg_catalog.pg_policy'::regclass AND pol.oid = incoming.objid
+				UNION ALL
+				SELECT pg_catalog.jsonb_build_object('kind', 'column', 'schema', ns.nspname, 'name', attr.attname, 'tableName', tbl.relname)
+				FROM pg_catalog.pg_attrdef def JOIN pg_catalog.pg_class tbl ON tbl.oid = def.adrelid
+				JOIN pg_catalog.pg_namespace ns ON ns.oid = tbl.relnamespace
+				JOIN pg_catalog.pg_attribute attr ON attr.attrelid = tbl.oid AND attr.attnum = def.adnum
+				WHERE incoming.classid = 'pg_catalog.pg_attrdef'::regclass AND def.oid = incoming.objid
+				UNION ALL
+				SELECT pg_catalog.jsonb_build_object('kind', 'trigger', 'schema', ns.nspname, 'name', trig.tgname, 'tableName', tbl.relname)
+				FROM pg_catalog.pg_trigger trig JOIN pg_catalog.pg_class tbl ON tbl.oid = trig.tgrelid
+				JOIN pg_catalog.pg_namespace ns ON ns.oid = tbl.relnamespace
+				WHERE incoming.classid = 'pg_catalog.pg_trigger'::regclass AND trig.oid = incoming.objid
+			) objects
+			WHERE incoming.refclassid = 'pg_catalog.pg_proc'::regclass AND incoming.refobjid = p.oid), '[]'::jsonb) AS "dependentObjects",
 		COALESCE((SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
 			'schema', referenced_namespace.nspname, 'name', referenced.proname,
 			'argumentTypes', COALESCE((SELECT pg_catalog.jsonb_agg(
@@ -108,6 +143,7 @@ export async function introspectPgRoutines(db: DB, schemaFilters: string[]) {
 			returnType: decodeJson(row.returnType),
 			relationDependencies: decodeJson(row.relationDependencies),
 			routineDependencies: decodeJson(row.routineDependencies),
+			dependentObjects: decodeJson(row.dependentObjects),
 		};
 		const destination = kind === 'f' ? functions : procedures;
 		destination[routineKey(fn)] = fn;
@@ -155,6 +191,22 @@ export function normalizeRoutineSnapshots(
 			schema: schemaAfterRename(fn.schema),
 			parameters: fn.parameters?.map((parameter) => ({ ...parameter, type: typeAfterRename(parameter.type) })),
 			returnType: fn.returnType ? typeAfterRename(fn.returnType) : undefined,
+			routineDependencies: fn.routineDependencies?.map((dependency) => ({
+				...dependency,
+				schema: schemaAfterRename(dependency.schema),
+				argumentTypes: dependency.argumentTypes.map((type) => typeAfterRename(type)),
+			})),
+			relationDependencies: fn.relationDependencies?.map((dependency) => {
+				const { schema, name } = typeAfterRename({ ...dependency, isArray: false });
+				return { ...dependency, schema, name };
+			}),
+			dependentObjects: fn.dependentObjects?.map((dependent) => {
+				if (!dependent.tableName || dependent.kind === 'trigger') {
+					return { ...dependent, schema: schemaAfterRename(dependent.schema) };
+				}
+				const table = typeAfterRename({ schema: dependent.schema, name: dependent.tableName, isArray: false });
+				return { ...dependent, schema: table.schema, tableName: table.name };
+			}),
 		};
 		// Relation renames run after drops. Compare their final identities, but use
 		// their current names if this routine really must be removed/recreated.
@@ -163,6 +215,8 @@ export function normalizeRoutineSnapshots(
 			schema: schemaAfterRename(fn.schema),
 			parameters: fn.parameters?.map((parameter) => ({ ...parameter, type: typeAfterRename(parameter.type, false) })),
 			returnType: fn.returnType ? typeAfterRename(fn.returnType, false) : undefined,
+			routineDependencies: remapped[key].routineDependencies,
+			dependentObjects: remapped[key].dependentObjects,
 		};
 	}
 	// Upgrade unchanged legacy entries using an exact definition match. Never guess
@@ -188,6 +242,7 @@ export function normalizeRoutineSnapshots(
 					defaultCount: match.defaultCount,
 					relationDependencies: match.relationDependencies,
 					routineDependencies: match.routineDependencies,
+					dependentObjects: match.dependentObjects,
 				}
 				: fn;
 			result[routineKey(normalized)] = normalized;
