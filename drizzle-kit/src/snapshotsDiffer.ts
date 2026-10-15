@@ -13,6 +13,7 @@ import {
 	ZodTypeAny,
 } from 'zod';
 import { applyJsonDiff, diffColumns, diffIndPolicies, diffPolicies, diffSchemasOrTables } from './jsonDiffer';
+import { orderPgRoutineDrops } from './serializer/pgRoutineOrdering';
 import { normalizeRoutineSnapshots, routineKey, routineRequiresDrop } from './serializer/pgRoutines';
 import { fromJson } from './sqlgenerator';
 
@@ -886,6 +887,14 @@ export const applyPgSnapshotsDiff = async (
 		const { key, name, schema } = nameSchemaChangeFor(it, renamedTables);
 		it.name = name;
 		it.schema = schema;
+		const move = movedTables.find((move) =>
+			move.name === name && (move.schemaFrom || 'public') === (schema || 'public')
+		);
+		if (move) {
+			const destination = `${move.schemaTo || 'public'}.${name}`;
+			it.schema = json2.tables[destination]?.schema ?? (move.schemaTo === 'public' ? '' : move.schemaTo);
+			return [destination, it];
+		}
 		return [key, it];
 	});
 
@@ -1857,6 +1866,68 @@ export const applyPgSnapshotsDiff = async (
 		const { materialized, with: withOption, definition, withNoData, using, tablespace } = json2.views[viewKey];
 
 		if (alteredView.alteredExisting || (alteredView.alteredDefinition && action !== 'push')) {
+			const previousView = prevFull.views[viewKey];
+			const currentView = curFull.views[viewKey];
+			const previousRoutines = [...Object.values(json1.functions ?? {}), ...Object.values(json1.procedures ?? {})];
+			const usesView = (routine: PgFunction) =>
+				[
+					...(routine.parameters ?? []).map((parameter) => parameter.type),
+					...(routine.returnType ? [routine.returnType] : []),
+					...(routine.relationDependencies ?? []),
+				].some((relation) => relation.schema === alteredView.schema && relation.name === alteredView.name);
+			const hasRoutineDependencies = previousRoutines.some((routine) =>
+				usesView(routine)
+				|| routine.dependentObjects?.some((object) =>
+					object.kind === 'view' && object.schema === alteredView.schema && object.name === alteredView.name
+				)
+			);
+			const dependentRoutineRequiresDrop = previousRoutines.some((routine) => {
+				if (
+					!routine.dependentObjects?.some((object) =>
+						object.kind === 'view' && object.schema === alteredView.schema && object.name === alteredView.name
+					)
+				) return false;
+				const next = [...Object.values(json2.functions ?? {}), ...Object.values(json2.procedures ?? {})].find((
+					candidate,
+				) => routineKey(candidate) === routineKey(routine));
+				return next && routineRequiresDrop(routine, next);
+			});
+			const previousColumns = Object.values(previousView.columns);
+			const currentColumns = Object.values(currentView.columns);
+			const compatible = !previousView.materialized && !currentView.materialized
+				&& previousColumns.every((column, index) => {
+					const next = currentColumns[index];
+					return next && column.name === next.name && column.type === next.type
+						&& column.typeSchema === next.typeSchema;
+				});
+			if (hasRoutineDependencies && compatible && !dependentRoutineRequiresDrop) {
+				createViews.push({
+					...preparePgCreateViewJson(
+						alteredView.name,
+						alteredView.schema,
+						definition!,
+						materialized,
+						withNoData,
+						withOption,
+						using,
+						tablespace,
+					),
+					replace: true,
+				});
+				continue;
+			}
+			if (
+				!compatible && previousRoutines.some((routine) =>
+					usesView(routine)
+					&& [...Object.values(json2.functions ?? {}), ...Object.values(json2.procedures ?? {})].some((next) =>
+						routineKey(next) === routineKey(routine)
+					)
+				)
+			) {
+				throw new Error(
+					`Cannot safely recreate view ${viewKey}: its incompatible column shape or materialization has surviving routine dependencies. Remove/recreate those dependencies explicitly and regenerate the migration.`,
+				);
+			}
 			dropViews.push(prepareDropViewJson(alteredView.name, alteredView.schema, materialized));
 
 			createViews.push(
@@ -2259,6 +2330,17 @@ export const applyPgSnapshotsDiff = async (
 	jsonStatements.push(...dropEnums);
 	jsonStatements.push(...dropSequences);
 	jsonStatements.push(...dropSchemas);
+	const orderedRoutineStatements = orderPgRoutineDrops(
+		jsonStatements,
+		[
+			...Object.values(previousFunctions),
+			...Object.values(previousProcedures),
+			...Object.values(functionDrops),
+			...Object.values(procedureDrops),
+		],
+		[...Object.values(currentFunctions), ...Object.values(currentProcedures)],
+	);
+	jsonStatements.splice(0, jsonStatements.length, ...orderedRoutineStatements);
 
 	// generate filters
 	const filteredJsonStatements = jsonStatements.filter((st) => {

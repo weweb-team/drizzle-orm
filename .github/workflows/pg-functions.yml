@@ -80,7 +80,7 @@ jobs:
         run: pnpm --filter @weweb/drizzle-kit test:pg-functions
       - name: Build distributable Kit package
         run: pnpm --filter @weweb/drizzle-kit build
-      - name: Run regressions against the built CommonJS API used by weweb-back
+      - name: Run regressions against the built CommonJS and ESM APIs
         env:
           DRIZZLE_FUNCTION_TEST_PACKAGE: '1'
         run: pnpm --filter @weweb/drizzle-kit exec vitest run tests/pg-functions.package.test.ts

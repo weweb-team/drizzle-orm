@@ -767,7 +767,9 @@ class PgCreateViewConvertor extends Convertor {
 
 		const name = schema ? `"${schema}"."${viewName}"` : `"${viewName}"`;
 
-		let statement = materialized ? `CREATE MATERIALIZED VIEW ${name}` : `CREATE VIEW ${name}`;
+		let statement = materialized
+			? `CREATE MATERIALIZED VIEW ${name}`
+			: `CREATE${st.replace ? ' OR REPLACE' : ''} VIEW ${name}`;
 
 		if (using) statement += ` USING "${using}"`;
 
