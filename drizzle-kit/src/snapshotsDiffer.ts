@@ -13,6 +13,7 @@ import {
 	ZodTypeAny,
 } from 'zod';
 import { applyJsonDiff, diffColumns, diffIndPolicies, diffPolicies, diffSchemasOrTables } from './jsonDiffer';
+import { pgArrayDefaultKey } from './serializer/pgArrayDefaults';
 import { orderPgRoutineDrops } from './serializer/pgRoutineOrdering';
 import { normalizeRoutineSnapshots, routineKey, routineRequiresDrop } from './serializer/pgRoutines';
 import { fromJson } from './sqlgenerator';
@@ -1189,6 +1190,27 @@ export const applyPgSnapshotsDiff = async (
 			return [viewKey, viewValue];
 		},
 	);
+
+	// PostgreSQL attaches the column's array type to literal defaults, while code-defined
+	// defaults omit that redundant cast. Align only equivalent literals on this comparison
+	// copy: SQL expressions and casts to a different type must retain their original meaning.
+	for (const [key, table] of Object.entries(json2.tables)) {
+		const previousTable = viewsPatchedSnap1.tables[key];
+		if (!previousTable) continue;
+		for (const column of Object.values(table.columns)) {
+			const previous = previousTable.columns[column.name];
+			if (!previous || previous.type !== column.type || !column.type.endsWith('[]')) continue;
+			// Enum elements also use comma delimiters. Require actual enum metadata rather
+			// than assuming that every custom type has PostgreSQL's ordinary array syntax.
+			const isEnum = !!json2.enums[`${column.typeSchema || 'public'}.${column.type.replaceAll('[]', '')}`];
+			if (
+				pgArrayDefaultKey(previous.default, column.type, isEnum)
+					=== pgArrayDefaultKey(column.default, column.type, isEnum)
+			) {
+				previous.default = column.default;
+			}
+		}
+	}
 
 	const diffResult = applyJsonDiff(viewsPatchedSnap1, json2);
 
