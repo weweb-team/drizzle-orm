@@ -1991,7 +1991,6 @@ WHERE
 
 const defaultForColumn = (column: any, internals: PgKitInternals, tableName: string) => {
 	const columnName = column.column_name;
-	const isArray = internals?.tables[tableName]?.columns[columnName]?.isArray ?? false;
 
 	if (
 		column.column_default === null
@@ -2002,6 +2001,11 @@ const defaultForColumn = (column: any, internals: PgKitInternals, tableName: str
 	) {
 		return undefined;
 	}
+
+	// PostgreSQL defaults are SQL expressions, not comma-separated array values (WW-6300).
+	// Preserve the expression before stripping casts: parsing it as a literal corrupts empty
+	// UUID arrays, ARRAY constructors, nested/JSON values and function expressions.
+	if (column.additional_dt === 'ARRAY') return column.column_default;
 
 	if (column.column_default.endsWith('[]')) {
 		column.column_default = column.column_default.slice(0, -2);
@@ -2014,30 +2018,6 @@ const defaultForColumn = (column: any, internals: PgKitInternals, tableName: str
 	// }
 
 	const columnDefaultAsString: string = column.column_default.toString();
-
-	if (isArray) {
-		return `'{${
-			columnDefaultAsString
-				.slice(2, -2)
-				.split(/\s*,\s*/g)
-				.map((value) => {
-					if (['integer', 'smallint', 'bigint', 'double precision', 'real'].includes(column.data_type.slice(0, -2))) {
-						return value;
-					} else if (column.data_type.startsWith('timestamp')) {
-						return `${value}`;
-					} else if (column.data_type.slice(0, -2) === 'interval') {
-						return value.replaceAll('"', `\"`);
-					} else if (column.data_type.slice(0, -2) === 'boolean') {
-						return value === 't' ? 'true' : 'false';
-					} else if (['json', 'jsonb'].includes(column.data_type.slice(0, -2))) {
-						return JSON.stringify(JSON.stringify(JSON.parse(JSON.parse(value)), null, 0));
-					} else {
-						return `\"${value}\"`;
-					}
-				})
-				.join(',')
-		}}'`;
-	}
 
 	if (['integer', 'smallint', 'bigint', 'double precision', 'real'].includes(column.data_type)) {
 		if (/^-?[\d.]+(?:e-?\d+)?$/.test(columnDefaultAsString)) {

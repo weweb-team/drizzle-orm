@@ -357,7 +357,7 @@ export const schemaToTypeScript = (schema: PgSchemaInternal, casing: Casing) => 
 
 			const columnImports = Object.values(it.columns)
 				.map((col) => {
-					let patched: string = (importsPatch[col.type] || col.type).replace('[]', '');
+					let patched: string = (importsPatch[col.type] || col.type).replaceAll('[]', '');
 					patched = patched === 'double precision' ? 'doublePrecision' : patched;
 					patched = patched.startsWith('varchar(') ? 'varchar' : patched;
 					patched = patched.startsWith('char(') ? 'char' : patched;
@@ -388,7 +388,7 @@ export const schemaToTypeScript = (schema: PgSchemaInternal, casing: Casing) => 
 		Object.values(it.columns).forEach(() => {
 			const columnImports = Object.values(it.columns)
 				.map((col) => {
-					let patched: string = (importsPatch[col.type] || col.type).replace('[]', '');
+					let patched: string = (importsPatch[col.type] || col.type).replaceAll('[]', '');
 					patched = patched === 'double precision' ? 'doublePrecision' : patched;
 					patched = patched.startsWith('varchar(') ? 'varchar' : patched;
 					patched = patched.startsWith('char(') ? 'char' : patched;
@@ -645,31 +645,6 @@ const isSelf = (fk: ForeignKey) => {
 	return fk.tableFrom === fk.tableTo;
 };
 
-const buildArrayDefault = (defaultValue: string, typeName: string): string => {
-	if (typeof defaultValue === 'string' && !(defaultValue.startsWith('{') || defaultValue.startsWith("'{"))) {
-		return `sql\`${defaultValue}\``;
-	}
-	defaultValue = defaultValue.substring(2, defaultValue.length - 2);
-	return `[${
-		defaultValue
-			.split(/\s*,\s*/g)
-			.map((value) => {
-				// 	if (['integer', 'smallint', 'bigint', 'double precision', 'real'].includes(typeName)) {
-				// 		return value;
-				// 	} else if (typeName === 'interval') {
-				// 		return value.replaceAll('"', "'");
-				// 	} else if (typeName === 'boolean') {
-				// 		return value === 't' ? 'true' : 'false';
-				if (typeName === 'json' || typeName === 'jsonb') {
-					return value.substring(1, value.length - 1).replaceAll('\\', '');
-				}
-				return value;
-				// 	}
-			})
-			.join(', ')
-	}]`;
-};
-
 const mapDefault = (
 	tableName: string,
 	type: string,
@@ -684,7 +659,9 @@ const mapDefault = (
 	const lowered = type.toLowerCase().replace('[]', '');
 
 	if (isArray) {
-		return typeof defaultValue !== 'undefined' ? `.default(${buildArrayDefault(defaultValue, lowered)})` : '';
+		// Array defaults remain PostgreSQL expressions, including casts and ARRAY constructors.
+		// A quoted JS string preserves backslashes, backticks and ${...} without interpolation.
+		return typeof defaultValue !== 'undefined' ? `.default(sql.raw(${JSON.stringify(defaultValue)}))` : '';
 	}
 
 	if (enumTypes.has(`${typeSchema}.${type.replace('[]', '')}`)) {

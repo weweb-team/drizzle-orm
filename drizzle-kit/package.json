@@ -1,6 +1,6 @@
 {
 	"name": "@weweb/drizzle-kit",
-	"version": "0.32.0-weweb.8",
+	"version": "0.32.0-weweb.9",
 	"homepage": "https://orm.drizzle.team",
 	"keywords": [
 		"drizzle",
@@ -103,6 +103,7 @@
 		"pg": "^8.16.0",
 		"pluralize": "^8.0.0",
 		"postgres": "^3.4.4",
+		"postgres-array": "3.0.4",
 		"prettier": "^3.5.3",
 		"semver": "^7.7.2",
 		"superjson": "^2.2.1",
