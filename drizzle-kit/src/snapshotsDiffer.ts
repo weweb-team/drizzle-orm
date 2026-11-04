@@ -1,18 +1,6 @@
-import {
-	any,
-	array,
-	boolean,
-	enum as enumType,
-	literal,
-	never,
-	object,
-	record,
-	string,
-	TypeOf,
-	union,
-	ZodTypeAny,
-} from 'zod';
+import { any, array, boolean, enum as enumType, literal, never, object, string, TypeOf, union, ZodTypeAny } from 'zod';
 import { applyJsonDiff, diffColumns, diffIndPolicies, diffPolicies, diffSchemasOrTables } from './jsonDiffer';
+import { safeRecord as record } from './safeRecord';
 import { pgArrayDefaultKey } from './serializer/pgArrayDefaults';
 import { orderPgRoutineDrops } from './serializer/pgRoutineOrdering';
 import { normalizeRoutineSnapshots, routineKey, routineRequiresDrop } from './serializer/pgRoutines';

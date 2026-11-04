@@ -3540,10 +3540,8 @@ class CreatePgIndexConvertor extends Convertor {
 
 		function reverseLogic(mappedWith: Record<string, string>): string {
 			let reversedString = '';
-			for (const key in mappedWith) {
-				if (mappedWith.hasOwnProperty(key)) {
-					reversedString += `${key}=${mappedWith[key]},`;
-				}
+			for (const [key, value] of Object.entries(mappedWith)) {
+				reversedString += `${key}=${value},`;
 			}
 			reversedString = reversedString.slice(0, -1);
 			return reversedString;

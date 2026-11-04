@@ -1,5 +1,5 @@
 'use-strict';
-import { diff } from 'json-diff';
+import { diff } from './safeJsonDiff';
 
 export function diffForRenamedTables(pairs) {
 	// raname table1 to name of table2, so we can apply diffs

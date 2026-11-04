@@ -1217,10 +1217,8 @@ const createTableIndexes = (tableName: string, idxs: Index[], casing: Casing): s
 
 		function reverseLogic(mappedWith: Record<string, string>): string {
 			let reversedString = '{';
-			for (const key in mappedWith) {
-				if (mappedWith.hasOwnProperty(key)) {
-					reversedString += `${key}: "${mappedWith[key]}",`;
-				}
+			for (const [key, value] of Object.entries(mappedWith)) {
+				reversedString += `${key}: "${value}",`;
 			}
 			reversedString = reversedString.length > 1 ? reversedString.slice(0, reversedString.length - 1) : reversedString;
 			return `${reversedString}}`;

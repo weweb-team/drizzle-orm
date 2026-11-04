@@ -39,6 +39,9 @@ jobs:
           tests/pg-array.test.ts
           tests/pg-array-defaults.codegen.test.ts
           tests/pg-array-defaults.compare.test.ts
+          tests/safeRecord.test.ts tests/safeJsonDiff.test.ts
+          tests/mysql-generated.test.ts tests/mysql-schemas.test.ts
+          tests/sqlite-generated.test.ts tests/sqlite-columns.test.ts
 
   migrations:
     runs-on: ubuntu-latest
@@ -81,7 +84,7 @@ jobs:
       - name: Run PostgreSQL and pgvector migration regressions
         run: >-
           pnpm --filter @weweb/drizzle-kit exec vitest run
-          tests/pg-functions.test.ts tests/pg-array-defaults.postgres.test.ts
+          tests/pg-functions.test.ts tests/pg-array-defaults.postgres.test.ts tests/pg-identifiers.test.ts
           tests/pg-array-defaults.codegen.test.ts
       - name: Build distributable Kit package
         run: pnpm --filter @weweb/drizzle-kit build

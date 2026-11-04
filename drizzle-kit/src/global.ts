@@ -17,7 +17,7 @@ export const mapValues = <IN, OUT>(
 	const result = Object.keys(obj).reduce(function(result, key) {
 		result[key] = map(obj[key]);
 		return result;
-	}, {} as Record<string, OUT>);
+	}, Object.create(null) as Record<string, OUT>);
 	return result;
 };
 
