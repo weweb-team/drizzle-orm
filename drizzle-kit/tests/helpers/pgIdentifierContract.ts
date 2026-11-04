@@ -2,12 +2,16 @@ import { randomUUID } from 'node:crypto';
 import { Client, escapeIdentifier } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-export function runPgIdentifierContract(api: typeof import('../../src/api')) {
+export function runPgIdentifierContract(
+	api: typeof import('../../src/api'),
+	generateCode: (snapshot: ReturnType<typeof api.generateDrizzleJson>, databaseUrl: string) => string,
+) {
 	const databaseUrl = process.env.DRIZZLE_FUNCTION_TEST_DATABASE_URL;
 	describe.skipIf(!databaseUrl)('reserved PostgreSQL identifier migration contract', () => {
 		let admin: Client;
 		let source: Client;
 		let target: Client;
+		let sourceDatabaseUrl: string;
 		const databases: string[] = [];
 		const schemas = ['public', '__proto__', 'constructor'];
 		const identifiers = [
@@ -34,6 +38,7 @@ export function runPgIdentifierContract(api: typeof import('../../src/api')) {
 				return url.href;
 			});
 			source = new Client({ connectionString: urls[0] });
+			sourceDatabaseUrl = urls[0];
 			target = new Client({ connectionString: urls[1] });
 			await source.connect();
 			await target.connect();
@@ -79,6 +84,16 @@ export function runPgIdentifierContract(api: typeof import('../../src/api')) {
 			expect(await generate()).toEqual([]);
 			return statements;
 		}
+
+		it('retains ordinary index storage options in migrations and generated schema code', async () => {
+			await source.query(
+				'CREATE TABLE public.ordinary (id integer); CREATE INDEX ordinary_idx ON public.ordinary (id) WITH (fillfactor=80)',
+			);
+			const current = await snapshot(source);
+			expect(current.tables['public.ordinary'].indexes.ordinary_idx.with).toEqual({ fillfactor: '80' });
+			expect(generateCode(current, sourceDatabaseUrl)).toContain('fillfactor: "80"');
+			expect((await apply()).length).toBeGreaterThan(0);
+		});
 
 		it('retains reserved columns through introspection and identical-schema validation', async () => {
 			const columns = identifiers.map((name) => `${escapeIdentifier(name)} text DEFAULT 'constructor'`).join(', ');
