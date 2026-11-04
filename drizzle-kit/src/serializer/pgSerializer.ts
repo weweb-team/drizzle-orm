@@ -48,6 +48,11 @@ export const indexName = (tableName: string, columns: string[]) => {
 	return `${tableName}_${columns.join('_')}_index`;
 };
 
+function getColumnInternals(internals: PgKitInternals, tableName: string, columnName: string) {
+	const table = internals!.tables[tableName] ??= { columns: Object.create(null) };
+	return table.columns[columnName] ??= {};
+}
+
 function stringFromIdentityProperty(field: string | number | undefined): string | undefined {
 	return typeof field === 'string' ? (field as string) : typeof field === 'undefined' ? undefined : String(field);
 }
@@ -112,22 +117,22 @@ export const generatePgSnapshot = (
 	schemaFilter?: string[],
 ): PgSchemaInternal => {
 	const dialect = new PgDialect({ casing });
-	const result: Record<string, Table> = {};
-	const resultViews: Record<string, View> = {};
-	const sequencesToReturn: Record<string, Sequence> = {};
-	const rolesToReturn: Record<string, Role> = {};
+	const result: Record<string, Table> = Object.create(null);
+	const resultViews: Record<string, View> = Object.create(null);
+	const sequencesToReturn: Record<string, Sequence> = Object.create(null);
+	const rolesToReturn: Record<string, Role> = Object.create(null);
 	// this policies are a separate objects that were linked to a table outside of it
-	const policiesToReturn: Record<string, Policy> = {};
+	const policiesToReturn: Record<string, Policy> = Object.create(null);
 
 	// This object stores unique names for indexes and will be used to detect if you have the same names for indexes
 	// within the same PostgreSQL schema
 
-	const indexesInSchema: Record<string, string[]> = {};
+	const indexesInSchema: Record<string, string[]> = Object.create(null);
 
 	for (const table of tables) {
 		// This object stores unique names for checks and will be used to detect if you have the same names for checks
 		// within the same PostgreSQL table
-		const checksInTable: Record<string, string[]> = {};
+		const checksInTable: Record<string, string[]> = Object.create(null);
 
 		const {
 			name: tableName,
@@ -146,13 +151,13 @@ export const generatePgSnapshot = (
 			continue;
 		}
 
-		const columnsObject: Record<string, Column> = {};
-		const indexesObject: Record<string, Index> = {};
-		const checksObject: Record<string, CheckConstraint> = {};
-		const foreignKeysObject: Record<string, ForeignKey> = {};
-		const primaryKeysObject: Record<string, PrimaryKey> = {};
-		const uniqueConstraintObject: Record<string, UniqueConstraint> = {};
-		const policiesObject: Record<string, Policy> = {};
+		const columnsObject: Record<string, Column> = Object.create(null);
+		const indexesObject: Record<string, Index> = Object.create(null);
+		const checksObject: Record<string, CheckConstraint> = Object.create(null);
+		const foreignKeysObject: Record<string, ForeignKey> = Object.create(null);
+		const primaryKeysObject: Record<string, PrimaryKey> = Object.create(null);
+		const uniqueConstraintObject: Record<string, UniqueConstraint> = Object.create(null);
+		const policiesObject: Record<string, Policy> = Object.create(null);
 
 		columns.forEach((column) => {
 			const name = getColumnCasing(column, casing);
@@ -730,8 +735,8 @@ export const generatePgSnapshot = (
 
 		const viewKey = `${viewSchema}.${viewName}`;
 
-		const columnsObject: Record<string, Column> = {};
-		const uniqueConstraintObject: Record<string, UniqueConstraint> = {};
+		const columnsObject: Record<string, Column> = Object.create(null);
+		const uniqueConstraintObject: Record<string, UniqueConstraint> = Object.create(null);
 
 		const existingView = resultViews[viewKey];
 		if (typeof existingView !== 'undefined') {
@@ -987,10 +992,10 @@ export const fromDatabase = async (
 	) => void,
 	tsSchema?: PgSchemaInternal,
 ): Promise<PgSchemaInternal> => {
-	const result: Record<string, Table> = {};
-	const views: Record<string, View> = {};
-	const policies: Record<string, Policy> = {};
-	const internals: PgKitInternals = { tables: {} };
+	const result: Record<string, Table> = Object.create(null);
+	const views: Record<string, View> = Object.create(null);
+	const policies: Record<string, Policy> = Object.create(null);
+	const internals: PgKitInternals = { tables: Object.create(null) };
 
 	const where = schemaFilters.map((t) => `n.nspname = '${t}'`).join(' or ');
 
@@ -1039,7 +1044,7 @@ WHERE
 	let checksCount = 0;
 	let viewsCount = 0;
 
-	const sequencesToReturn: Record<string, Sequence> = {};
+	const sequencesToReturn: Record<string, Sequence> = Object.create(null);
 
 	const seqWhere = schemaFilters.map((t) => `schemaname = '${t}'`).join(' or ');
 
@@ -1086,7 +1091,7 @@ WHERE
   order by enum_schema, enum_name, sort_order;`,
 	);
 
-	const enumsToReturn: Record<string, Enum> = {};
+	const enumsToReturn: Record<string, Enum> = Object.create(null);
 
 	for (const dbEnum of allEnums) {
 		const enumName = dbEnum.enum_name;
@@ -1114,7 +1119,7 @@ WHERE
 		`SELECT rolname, rolinherit, rolcreatedb, rolcreaterole FROM pg_roles;`,
 	);
 
-	const rolesToReturn: Record<string, Role> = {};
+	const rolesToReturn: Record<string, Role> = Object.create(null);
 
 	const preparedRoles = prepareRoles(entities);
 
@@ -1155,7 +1160,7 @@ WHERE
 		.map((t) => `schemaname = '${t}'`)
 		.join(' or ');
 
-	const policiesByTable: Record<string, Record<string, Policy>> = {};
+	const policiesByTable: Record<string, Record<string, Policy>> = Object.create(null);
 
 	const allPolicies = await db.query<
 		{
@@ -1174,20 +1179,14 @@ WHERE
 
 	for (const dbPolicy of allPolicies) {
 		const { tablename, schemaname, to, withCheck, using, ...rest } = dbPolicy;
-		const tableForPolicy = policiesByTable[`${schemaname}.${tablename}`];
+		const tableForPolicy = policiesByTable[`${schemaname}.${tablename}`] ??= Object.create(null);
 
 		const parsedTo = typeof to === 'string' ? to.slice(1, -1).split(',') : to;
 
 		const parsedWithCheck = withCheck === null ? undefined : withCheck;
 		const parsedUsing = using === null ? undefined : using;
 
-		if (tableForPolicy) {
-			tableForPolicy[dbPolicy.name] = { ...rest, to: parsedTo } as Policy;
-		} else {
-			policiesByTable[`${schemaname}.${tablename}`] = {
-				[dbPolicy.name]: { ...rest, to: parsedTo, withCheck: parsedWithCheck, using: parsedUsing } as Policy,
-			};
-		}
+		tableForPolicy[dbPolicy.name] = { ...rest, to: parsedTo, withCheck: parsedWithCheck, using: parsedUsing } as Policy;
 
 		if (tsSchema?.policies[dbPolicy.name]) {
 			policies[dbPolicy.name] = {
@@ -1222,12 +1221,12 @@ WHERE
 				const tableSchema = row.table_schema;
 
 				try {
-					const columnToReturn: Record<string, Column> = {};
-					const indexToReturn: Record<string, Index> = {};
-					const foreignKeysToReturn: Record<string, ForeignKey> = {};
-					const primaryKeys: Record<string, PrimaryKey> = {};
-					const uniqueConstrains: Record<string, UniqueConstraint> = {};
-					const checkConstraints: Record<string, CheckConstraint> = {};
+					const columnToReturn: Record<string, Column> = Object.create(null);
+					const indexToReturn: Record<string, Index> = Object.create(null);
+					const foreignKeysToReturn: Record<string, ForeignKey> = Object.create(null);
+					const primaryKeys: Record<string, PrimaryKey> = Object.create(null);
+					const uniqueConstrains: Record<string, UniqueConstraint> = Object.create(null);
+					const checkConstraints: Record<string, CheckConstraint> = Object.create(null);
 
 					const tableResponse = await getColumnsInfoQuery({ schema: tableSchema, table: tableName, db });
 
@@ -1427,25 +1426,11 @@ WHERE
 
 						// Set default to internal object
 						if (columnAdditionalDT === 'ARRAY') {
-							if (typeof internals.tables[tableName] === 'undefined') {
-								internals.tables[tableName] = {
-									columns: {
-										[columnName]: {
-											isArray: true,
-											dimensions: columnDimensions,
-											rawType: columnTypeMapped.substring(0, columnTypeMapped.length - 2),
-										},
-									},
-								};
-							} else {
-								if (typeof internals.tables[tableName]!.columns[columnName] === 'undefined') {
-									internals.tables[tableName]!.columns[columnName] = {
-										isArray: true,
-										dimensions: columnDimensions,
-										rawType: columnTypeMapped.substring(0, columnTypeMapped.length - 2),
-									};
-								}
-							}
+							Object.assign(getColumnInternals(internals, tableName, columnName), {
+								isArray: true,
+								dimensions: columnDimensions,
+								rawType: columnTypeMapped.substring(0, columnTypeMapped.length - 2),
+							});
 						}
 
 						const defaultValue = defaultForColumn(columnResponse, internals, tableName);
@@ -1453,23 +1438,7 @@ WHERE
 							defaultValue === 'NULL'
 							|| (defaultValueRes && defaultValueRes.startsWith('(') && defaultValueRes.endsWith(')'))
 						) {
-							if (typeof internals!.tables![tableName] === 'undefined') {
-								internals!.tables![tableName] = {
-									columns: {
-										[columnName]: {
-											isDefaultAnExpression: true,
-										},
-									},
-								};
-							} else {
-								if (typeof internals!.tables![tableName]!.columns[columnName] === 'undefined') {
-									internals!.tables![tableName]!.columns[columnName] = {
-										isDefaultAnExpression: true,
-									};
-								} else {
-									internals!.tables![tableName]!.columns[columnName]!.isDefaultAnExpression = true;
-								}
-							}
+							getColumnInternals(internals, tableName, columnName).isDefaultAnExpression = true;
 						}
 
 						const isSerial = columnType === 'serial';
@@ -1606,7 +1575,7 @@ WHERE
 						const desc: boolean = dbIndex.descending;
 						const nullsFirst: boolean = dbIndex.nulls_first;
 
-						const mappedWith: Record<string, string> = {};
+						const mappedWith: Record<string, string> = Object.create(null);
 
 						if (indexWith !== null) {
 							indexWith
@@ -1691,7 +1660,7 @@ WHERE
 				const viewSchema = row.table_schema;
 
 				try {
-					const columnToReturn: Record<string, Column> = {};
+					const columnToReturn: Record<string, Column> = Object.create(null);
 
 					const viewResponses = await getColumnsInfoQuery({ schema: viewSchema, table: viewName, db });
 
@@ -1722,25 +1691,11 @@ WHERE
 
 						// Set default to internal object
 						if (columnAdditionalDT === 'ARRAY') {
-							if (typeof internals.tables[viewName] === 'undefined') {
-								internals.tables[viewName] = {
-									columns: {
-										[columnName]: {
-											isArray: true,
-											dimensions: columnDimensions,
-											rawType: columnTypeMapped.substring(0, columnTypeMapped.length - 2),
-										},
-									},
-								};
-							} else {
-								if (typeof internals.tables[viewName]!.columns[columnName] === 'undefined') {
-									internals.tables[viewName]!.columns[columnName] = {
-										isArray: true,
-										dimensions: columnDimensions,
-										rawType: columnTypeMapped.substring(0, columnTypeMapped.length - 2),
-									};
-								}
-							}
+							Object.assign(getColumnInternals(internals, viewName, columnName), {
+								isArray: true,
+								dimensions: columnDimensions,
+								rawType: columnTypeMapped.substring(0, columnTypeMapped.length - 2),
+							});
 						}
 
 						const defaultValue = defaultForColumn(viewResponse, internals, viewName);
@@ -1748,23 +1703,7 @@ WHERE
 							defaultValue === 'NULL'
 							|| (defaultValueRes && defaultValueRes.startsWith('(') && defaultValueRes.endsWith(')'))
 						) {
-							if (typeof internals!.tables![viewName] === 'undefined') {
-								internals!.tables![viewName] = {
-									columns: {
-										[columnName]: {
-											isDefaultAnExpression: true,
-										},
-									},
-								};
-							} else {
-								if (typeof internals!.tables![viewName]!.columns[columnName] === 'undefined') {
-									internals!.tables![viewName]!.columns[columnName] = {
-										isDefaultAnExpression: true,
-									};
-								} else {
-									internals!.tables![viewName]!.columns[columnName]!.isDefaultAnExpression = true;
-								}
-							}
+							getColumnInternals(internals, viewName, columnName).isDefaultAnExpression = true;
 						}
 
 						const isSerial = columnType === 'serial';
@@ -1946,7 +1885,8 @@ WHERE
 		ORDER BY schema, table_name, name;`,
 	);
 
-	const triggersToReturn: Record<string, { name: string; schema: string; tableName: string; definition: string }> = {};
+	const triggersToReturn: Record<string, { name: string; schema: string; tableName: string; definition: string }> =
+		Object.create(null);
 	for (const row of allTriggers) {
 		if (row.definition) {
 			const key = `${row.schema}.${row.table_name}.${row.name}`;
@@ -2023,23 +1963,7 @@ const defaultForColumn = (column: any, internals: PgKitInternals, tableName: str
 		if (/^-?[\d.]+(?:e-?\d+)?$/.test(columnDefaultAsString)) {
 			return Number(columnDefaultAsString);
 		} else {
-			if (typeof internals!.tables![tableName] === 'undefined') {
-				internals!.tables![tableName] = {
-					columns: {
-						[columnName]: {
-							isDefaultAnExpression: true,
-						},
-					},
-				};
-			} else {
-				if (typeof internals!.tables![tableName]!.columns[columnName] === 'undefined') {
-					internals!.tables![tableName]!.columns[columnName] = {
-						isDefaultAnExpression: true,
-					};
-				} else {
-					internals!.tables![tableName]!.columns[columnName]!.isDefaultAnExpression = true;
-				}
-			}
+			getColumnInternals(internals, tableName, columnName).isDefaultAnExpression = true;
 			return columnDefaultAsString;
 		}
 	} else if (column.data_type.includes('numeric')) {
@@ -2050,9 +1974,7 @@ const defaultForColumn = (column: any, internals: PgKitInternals, tableName: str
 		return `'${jsonWithoutSpaces}'::${column.data_type}`;
 	} else if (column.data_type === 'boolean') {
 		if (columnDefaultAsString === 'true' || columnDefaultAsString === 'false') return columnDefaultAsString === 'true';
-		const tableInternals = internals!.tables![tableName] ??= { columns: {} };
-		const columnInternals = tableInternals.columns[columnName] ??= {};
-		columnInternals.isDefaultAnExpression = true;
+		getColumnInternals(internals, tableName, columnName).isDefaultAnExpression = true;
 		return columnDefaultAsString;
 	} else if (columnDefaultAsString === 'NULL') {
 		return `NULL`;

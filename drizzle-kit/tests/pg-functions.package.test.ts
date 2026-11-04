@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, it } from 'vitest';
 import { runPgArrayDefaultsContract } from './helpers/pgArrayDefaultsContract';
+import { runPgIdentifierContract } from './helpers/pgIdentifierContract';
 import { runPgRoutineContract } from './helpers/pgRoutineContract';
 
 if (process.env.DRIZZLE_FUNCTION_TEST_PACKAGE === '1') {
@@ -13,12 +14,14 @@ if (process.env.DRIZZLE_FUNCTION_TEST_PACKAGE === '1') {
 		const api = require(resolve(directory, 'api.js'));
 		runPgRoutineContract(api);
 		runPgArrayDefaultsContract(api);
+		runPgIdentifierContract(api);
 	});
 	// Node 22+ loads ESM here without Vite rewriting the bundled artifact.
 	describe('built ESM API', () => {
 		const api = require(resolve(directory, 'api.mjs'));
 		runPgRoutineContract(api);
 		runPgArrayDefaultsContract(api);
+		runPgIdentifierContract(api);
 	});
 	it('supports native ESM import', () => {
 		const url = pathToFileURL(resolve(directory, 'api.mjs')).href;
