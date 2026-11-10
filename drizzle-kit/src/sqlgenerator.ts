@@ -100,7 +100,7 @@ import { SQLiteSchemaSquashed, SQLiteSquasher } from './serializer/sqliteSchema'
 
 import { escapeSingleQuotes } from './utils';
 
-const parseType = (schemaPrefix: string, type: string) => {
+const parseType = (schemaPrefix: string, type: string, isEnum = false) => {
 	const pgNativeTypes = [
 		'uuid',
 		'smallint',
@@ -151,7 +151,7 @@ const parseType = (schemaPrefix: string, type: string) => {
 	const arrayDefinitionRegex = /\[\d*(?:\[\d*\])*\]/g;
 	const arrayDefinition = (type.match(arrayDefinitionRegex) ?? []).join('');
 	const withoutArrayDefinition = type.replace(arrayDefinitionRegex, '');
-	return pgNativeTypes.some((it) => type.startsWith(it))
+	return !isEnum && pgNativeTypes.some((it) => type.startsWith(it))
 		? `${withoutArrayDefinition}${arrayDefinition}`
 		: `${schemaPrefix}"${withoutArrayDefinition}"${arrayDefinition}`;
 };
@@ -418,7 +418,7 @@ class PgCreateTableConvertor extends Convertor {
 				? `"${column.typeSchema}".`
 				: '';
 
-			const type = parseType(schemaPrefix, column.type);
+			const type = parseType(schemaPrefix, column.type, column.typeSchema !== undefined);
 			const generated = column.generated;
 
 			const generatedStatement = generated ? ` GENERATED ALWAYS AS (${generated?.as}) STORED` : '';
@@ -1508,7 +1508,7 @@ class AlterTypeDropValueConvertor extends Convertor {
 				? `"${withEnum.tableSchema}"."${withEnum.table}"`
 				: `"${withEnum.table}"`;
 
-			const parsedType = parseType(`"${enumSchema}".`, withEnum.columnType);
+			const parsedType = parseType(`"${enumSchema}".`, withEnum.columnType, true);
 			if (withEnum.default) {
 				statements.push(
 					`ALTER TABLE ${tableNameWithSchema} ALTER COLUMN "${withEnum.column}" SET DEFAULT ${withEnum.default}::${parsedType};`,
@@ -1767,7 +1767,7 @@ class PgAlterTableAddColumnConvertor extends Convertor {
 			? `"${column.typeSchema}".`
 			: '';
 
-		const fixedType = parseType(schemaPrefix, column.type);
+		const fixedType = parseType(schemaPrefix, column.type, column.typeSchema !== undefined);
 
 		const notNullStatement = `${notNull ? ' NOT NULL' : ''}`;
 
@@ -1919,7 +1919,7 @@ class PgAlterTableAlterColumnSetTypeConvertor extends Convertor {
 
 		const statements: string[] = [];
 
-		const type = parseType(`"${typeSchema}".`, newDataType.name);
+		const type = parseType(`"${typeSchema}".`, newDataType.name, newDataType.isEnum);
 
 		if (!oldDataType.isEnum && !newDataType.isEnum) {
 			statements.push(
