@@ -3524,10 +3524,10 @@ class CreatePgIndexConvertor extends Convertor {
 		const value = columns
 			.map(
 				(it) =>
-					`${it.isExpression ? it.expression : `"${it.expression}"`}${
-						it.opclass ? ` ${it.opclass}` : it.asc ? '' : ' DESC'
+					`${it.isExpression ? it.expression : `"${it.expression}"`}${it.opclass ? ` ${it.opclass}` : ''}${
+						(!it.opclass || method === 'btree') && !it.asc ? ' DESC' : ''
 					}${
-						(it.asc && it.nulls && it.nulls === 'last') || it.opclass
+						(it.opclass && method !== 'btree') || !it.nulls || (it.asc && it.nulls === 'last')
 							? ''
 							: ` NULLS ${it.nulls!.toUpperCase()}`
 					}`,

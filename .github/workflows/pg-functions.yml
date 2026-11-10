@@ -85,6 +85,7 @@ jobs:
         run: >-
           pnpm --filter @weweb/drizzle-kit exec vitest run
           tests/pg-functions.test.ts tests/pg-array-defaults.postgres.test.ts tests/pg-identifiers.test.ts
+          tests/pg-index-metadata.postgres.test.ts
           tests/pg-array-defaults.codegen.test.ts
       - name: Build distributable Kit package
         run: pnpm --filter @weweb/drizzle-kit build

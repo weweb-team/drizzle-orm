@@ -1520,7 +1520,7 @@ WHERE
         ic.reloptions as with,
         coalesce(a.attname, pg_get_indexdef(i.indexrelid, k.i, false)) AS column_name,
           CASE
-        WHEN pg_get_expr(i.indexprs, i.indrelid) IS NOT NULL THEN 1
+        WHEN k.attnum = 0 THEN 1
         ELSE 0
     END AS is_expression,
         i.indoption[k.i-1] & 1 = 1 AS descending,
@@ -1538,7 +1538,7 @@ WHERE
             ON i.indrelid = a.attrelid AND k.attnum = a.attnum
           JOIN pg_namespace c on c.oid = t.relnamespace
         LEFT JOIN pg_am AS am ON ic.relam = am.oid
-        JOIN pg_opclass opc ON opc.oid = ANY(i.indclass)
+        JOIN pg_opclass opc ON opc.oid = i.indclass[k.i-1]
       WHERE
       c.nspname = '${tableSchema}' AND
       t.relname = '${tableName}';`,
