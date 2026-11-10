@@ -37,6 +37,7 @@ jobs:
           tests/pg-enums.test.ts tests/pg-schemas.test.ts tests/pg-tables.test.ts
           tests/pg-columns.test.ts tests/pg-views.test.ts tests/pg-sequences.test.ts
           tests/pg-array.test.ts
+          tests/pg-schema-cascade.test.ts
           tests/pg-array-defaults.codegen.test.ts
           tests/pg-array-defaults.compare.test.ts
           tests/safeRecord.test.ts tests/safeJsonDiff.test.ts
@@ -86,6 +87,7 @@ jobs:
           pnpm --filter @weweb/drizzle-kit exec vitest run
           tests/pg-functions.test.ts tests/pg-array-defaults.postgres.test.ts tests/pg-identifiers.test.ts
           tests/pg-index-metadata.postgres.test.ts
+          tests/pg-schema-cascade.test.ts
           tests/pg-array-defaults.codegen.test.ts
       - name: Build distributable Kit package
         run: pnpm --filter @weweb/drizzle-kit build

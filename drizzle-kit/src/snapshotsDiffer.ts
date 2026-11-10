@@ -587,6 +587,7 @@ export const applyPgSnapshotsDiff = async (
 	prevFull: PgSchema,
 	curFull: PgSchema,
 	action?: 'push' | undefined,
+	cascadeDropSchemas?: boolean,
 ): Promise<{
 	statements: JsonStatement[];
 	sqlStatements: string[];
@@ -1807,6 +1808,7 @@ export const applyPgSnapshotsDiff = async (
 
 	const dropSchemas = prepareDropSchemasJson(
 		deletedSchemas.map((it) => it.name),
+		cascadeDropSchemas,
 	);
 
 	const createTables = createdTables.map((it) => {
