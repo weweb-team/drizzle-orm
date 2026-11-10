@@ -1463,12 +1463,13 @@ WHERE
 
 						columnToReturn[columnName] = {
 							name: columnName,
-							type:
+							type: columnAdditionalDT === 'ARRAY' && enumsToReturn[`${typeSchema}.${enumType}`]
+								? `${enumType}${'[]'.repeat(Math.max(1, Number(columnDimensions) || 1))}`
 								// filter vectors, but in future we should filter any extension that was installed by user
-								columnAdditionalDT === 'USER-DEFINED'
-									&& !['vector', 'geometry', 'halfvec', 'sparsevec', 'bit'].includes(enumType)
-									? enumType
-									: columnTypeMapped,
+								: columnAdditionalDT === 'USER-DEFINED'
+										&& !['vector', 'geometry', 'halfvec', 'sparsevec', 'bit'].includes(enumType)
+								? enumType
+								: columnTypeMapped,
 							typeSchema: enumsToReturn[`${typeSchema}.${enumType}`] !== undefined
 								? enumsToReturn[`${typeSchema}.${enumType}`].schema
 								: undefined,
@@ -1728,12 +1729,13 @@ WHERE
 
 						columnToReturn[columnName] = {
 							name: columnName,
-							type:
+							type: columnAdditionalDT === 'ARRAY' && enumsToReturn[`${typeSchema}.${enumType}`]
+								? `${enumType}${'[]'.repeat(Math.max(1, Number(columnDimensions) || 1))}`
 								// filter vectors, but in future we should filter any extension that was installed by user
-								columnAdditionalDT === 'USER-DEFINED'
-									&& !['vector', 'geometry', 'halfvec', 'sparsevec', 'bit'].includes(enumType)
-									? enumType
-									: columnTypeMapped,
+								: columnAdditionalDT === 'USER-DEFINED'
+										&& !['vector', 'geometry', 'halfvec', 'sparsevec', 'bit'].includes(enumType)
+								? enumType
+								: columnTypeMapped,
 							typeSchema: enumsToReturn[`${typeSchema}.${enumType}`] !== undefined
 								? enumsToReturn[`${typeSchema}.${enumType}`].schema
 								: undefined,
@@ -2019,7 +2021,7 @@ const getColumnsInfoQuery = ({ schema, table, db }: { schema: string; table: str
     pg_get_serial_sequence('"${schema}"."${table}"', a.attname)::regclass AS seq_name,  -- Serial sequence (if any)
     c.column_default,  -- Column default value
     c.data_type AS additional_dt,  -- Data type from information_schema
-    c.udt_name AS enum_name,  -- Enum type (if applicable)
+    CASE WHEN enum_element.oid IS NOT NULL THEN enum_element.typname ELSE c.udt_name END AS enum_name,
     c.is_generated,  -- Is it a generated column?
     c.generation_expression,  -- Generation expression (if generated)
     c.is_identity,  -- Is it an identity column?
@@ -2029,7 +2031,7 @@ const getColumnsInfoQuery = ({ schema, table, db }: { schema: string; table: str
     c.identity_maximum,  -- Maximum value for identity column
     c.identity_minimum,  -- Minimum value for identity column
     c.identity_cycle,  -- Does the identity column cycle?
-    enum_ns.nspname AS type_schema  -- Schema of the enum type
+    COALESCE(enum_element_ns.nspname, enum_ns.nspname) AS type_schema
 FROM 
     pg_attribute a
 JOIN 
@@ -2042,6 +2044,10 @@ LEFT JOIN
         AND c.table_name = cls.relname  -- Match schema and table/view name
 LEFT JOIN 
     pg_type enum_t ON enum_t.oid = a.atttypid  -- Join to get the type info
+LEFT JOIN
+    pg_type enum_element ON enum_element.oid = enum_t.typelem AND enum_element.typtype = 'e'
+LEFT JOIN
+    pg_namespace enum_element_ns ON enum_element_ns.oid = enum_element.typnamespace
 LEFT JOIN 
     pg_namespace enum_ns ON enum_ns.oid = enum_t.typnamespace  -- Join to get the enum schema
 WHERE 

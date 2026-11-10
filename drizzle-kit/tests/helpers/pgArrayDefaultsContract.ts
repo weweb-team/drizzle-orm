@@ -349,6 +349,33 @@ export function runPgArrayDefaultsContract(
 			expect(await api.generateMigration(await snapshot(target), declared)).toEqual([]);
 		});
 
+		it.each([
+			['one-dimensional', "ARRAY['member'::auth.role]"],
+			['empty', "'{}'::auth.role[]"],
+			['two-dimensional', "ARRAY[ARRAY['member'::auth.role]]"],
+		])('preserves a non-public enum array and its %s default', async (_label, expression) => {
+			await source.query(
+				`CREATE SCHEMA auth; CREATE TYPE auth.role AS ENUM ('member', 'admin'); CREATE TABLE public.people (roles auth.role[] DEFAULT ${expression}); CREATE VIEW people_roles AS SELECT roles FROM people`,
+			);
+			await apply(await generate());
+			const wanted = (await source.query('INSERT INTO people DEFAULT VALUES RETURNING roles::text')).rows;
+			expect((await target.query('INSERT INTO people DEFAULT VALUES RETURNING roles::text')).rows).toEqual(wanted);
+			expect((await target.query('SELECT roles::text FROM people_roles')).rows).toEqual(wanted);
+			expect(await generate()).toEqual([]);
+		});
+
+		it('keeps native-looking enum names qualified when adding array columns to existing tables', async () => {
+			for (const client of [source, target]) await client.query('CREATE TABLE people (id integer)');
+			await source.query(
+				"CREATE SCHEMA auth; CREATE TYPE auth.text_status AS ENUM ('member', 'admin'); ALTER TABLE people ADD COLUMN roles auth.text_status[] DEFAULT ARRAY['member'::auth.text_status]",
+			);
+			await apply(await generate());
+			expect((await target.query('INSERT INTO people DEFAULT VALUES RETURNING roles::text')).rows).toEqual([{
+				roles: '{member}',
+			}]);
+			expect(await generate()).toEqual([]);
+		});
+
 		it('keeps identically named array columns in different schemas separate', async () => {
 			await source.query(
 				"CREATE SCHEMA auth; CREATE TABLE public.defaults (ids uuid[] DEFAULT '{}'::uuid[]); CREATE TABLE auth.defaults (ids text[] DEFAULT ARRAY['auth', 'a,b'])",
